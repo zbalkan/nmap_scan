@@ -97,7 +97,7 @@ def log_debug(text: object, verbose: bool = False) -> None:
     logging.debug(message)
 
     if (verbose):
-        print(message)
+        print(json.dumps(json.loads(message), indent=4))
 
 
 def log_info(text: object, verbose: bool = False) -> None:
@@ -113,7 +113,7 @@ def log_info(text: object, verbose: bool = False) -> None:
     logging.debug(message)
 
     if (verbose):
-        print(message)
+        print(json.dumps(json.loads(message), indent=4))
 
 
 if __name__ == "__main__":
@@ -125,8 +125,6 @@ if __name__ == "__main__":
             sys.exit(0)
         except SystemExit:
             os._exit(0)
-
-
 
 EOF
 
