@@ -1,5 +1,2 @@
-mypy==0.971
-mypy-extensions==0.4.3
 python-nmap==0.7.1
-tomli==2.0.1
-typing_extensions==4.3.0
+typing_extensions
