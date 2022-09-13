@@ -12,18 +12,70 @@ import platform
 import sys
 from datetime import datetime
 
+import jsonschema
 import nmap
+
+SCHEMA: str = '''
+{
+    "$schema": "https://json-schema.org/draft/2019-09/schema",
+    "$id": "http://example.com/example.json",
+    "type": "object",
+    "default": {},
+    "title": "Root Schema",
+    "required": [
+        "subnets",
+        "verbose"
+    ],
+    "properties": {
+        "subnets": {
+            "type": "array",
+            "default": [],
+            "title": "The subnets Schema",
+            "items": {
+                "type": "string",
+                "default": "",
+                "title": "A Schema",
+                "examples": [
+                    "192.168.166.0/24"
+                ]
+            },
+            "examples": [
+                [
+                    "192.168.166.0/24"]
+            ]
+        },
+        "verbose": {
+            "type": "boolean",
+            "default": false,
+            "title": "The verbose Schema",
+            "examples": [
+                true
+            ]
+        }
+    },
+    "examples": [{
+        "subnets": [
+            "192.168.166.0/24"
+        ],
+        "verbose": true
+    }]
+}
+'''
 
 
 def main() -> None:
-    # Read configuration
-    subnetsPath: str = os.path.dirname(
-        os.path.realpath(__file__)) + "/subnets.json"
-    with open(subnetsPath, "r") as read_file:
-        data = json.load(read_file)
+    # Read and validate configuration
+    configPath: str = os.path.dirname(
+        os.path.realpath(__file__)) + "/config.json"
+    with open(configPath, "r") as read_file:
+        tempConfig = json.load(read_file)
 
-    subnets: list = data.get("subnets")
-    verbose: bool = data.get("verbose")
+    if (__validate_json(tempConfig, SCHEMA) == False):
+        print("Invalid config file")
+        exit(1)
+
+    subnets: list = tempConfig.get("subnets")
+    verbose: bool = tempConfig.get("verbose")
 
     logpath: str = detect_logpath()
 
@@ -96,6 +148,13 @@ def __log(text: object, level: str, verbose: bool = False) -> None:
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
+
+def __validate_json(jsonData: str, schema) -> bool:
+    try:
+        jsonschema.validate(instance=jsonData, schema=schema)
+    except Exception:
+        return False
+    return True
 
 
 # We assume the result is successful when user interrupted
