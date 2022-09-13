@@ -32,18 +32,70 @@ import platform
 import sys
 from datetime import datetime
 
+import jsonschema
 import nmap
+
+SCHEMA: str = '''
+{
+    "$schema": "https://json-schema.org/draft/2019-09/schema",
+    "$id": "http://example.com/example.json",
+    "type": "object",
+    "default": {},
+    "title": "Root Schema",
+    "required": [
+        "subnets",
+        "verbose"
+    ],
+    "properties": {
+        "subnets": {
+            "type": "array",
+            "default": [],
+            "title": "The subnets Schema",
+            "items": {
+                "type": "string",
+                "default": "",
+                "title": "A Schema",
+                "examples": [
+                    "192.168.166.0/24"
+                ]
+            },
+            "examples": [
+                [
+                    "192.168.166.0/24"]
+            ]
+        },
+        "verbose": {
+            "type": "boolean",
+            "default": false,
+            "title": "The verbose Schema",
+            "examples": [
+                true
+            ]
+        }
+    },
+    "examples": [{
+        "subnets": [
+            "192.168.166.0/24"
+        ],
+        "verbose": true
+    }]
+}
+'''
 
 
 def main() -> None:
-    # Read configuration
-    subnetsPath: str = os.path.dirname(
-        os.path.realpath(__file__)) + "/subnets.json"
-    with open(subnetsPath, "r") as read_file:
-        data = json.load(read_file)
+    # Read and validate configuration
+    configPath: str = os.path.dirname(
+        os.path.realpath(__file__)) + "/config.json"
+    with open(configPath, "r") as read_file:
+        tempConfig = json.load(read_file)
 
-    subnets: list = data.get("subnets")
-    verbose: bool = data.get("verbose")
+    if (__validate_json(tempConfig, SCHEMA) == False):
+        print("Invalid config file")
+        exit(1)
+
+    subnets: list = tempConfig.get("subnets")
+    verbose: bool = tempConfig.get("verbose")
 
     logpath: str = detect_logpath()
 
@@ -53,7 +105,7 @@ def main() -> None:
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
 
-    excepthook = logging.error
+    excepthook = log_error
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
@@ -85,37 +137,50 @@ def detect_logpath() -> str:
 
 
 def log_debug(text: object, verbose: bool = False) -> None:
-    logRecord: dict = dict()
-    now: datetime = datetime.now()
-    logRecord["timestamp"] = str(now.now())
-    logRecord["timezone"] = str(now.tzname())
-    logRecord["utc"] = str(now.utcnow())
-    logRecord["type"] = "nmap_scan"
-    logRecord["level"] = "debug"
-    logRecord["message"] = text
-    message: str = json.dumps(logRecord, sort_keys=True)
-    logging.debug(message)
-
-    if (verbose):
-        print(json.dumps(json.loads(message), indent=4))
+    __log(text, 'debug', verbose)
 
 
 def log_info(text: object, verbose: bool = False) -> None:
+    __log(text, 'info', verbose)
+
+
+def log_error(text: object, verbose: bool = False) -> None:
+    __log(text, 'error', verbose)
+
+
+def __log(text: object, level: str, verbose: bool = False) -> None:
     logRecord: dict = dict()
     now: datetime = datetime.now()
-    logRecord["timestamp"] = str(now.now())
-    logRecord["timezone"] = str(now.tzname())
-    logRecord["utc"] = str(now.utcnow())
+    logRecord["localtime"] = str(now.now())
+    logRecord["utctime"] = str(now.utcnow())
     logRecord["type"] = "nmap_scan"
-    logRecord["level"] = "info"
     logRecord["message"] = text
+    logRecord["level"] = level
+
     message: str = json.dumps(logRecord, sort_keys=True)
-    logging.debug(message)
+
+    if (level == 'error'):
+        logging.error(message)
+    if (level == 'info'):
+        logging.info(message)
+    if (level == 'debug'):
+        logging.debug(message)
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
 
 
+def __validate_json(jsonData: str, schema) -> bool:
+    try:
+        jsonschema.validate(instance=jsonData, schema=schema)
+    except Exception:
+        return False
+    return True
+
+
+# We assume the result is successful when user interrupted
+# the scan as it is an intentional act.
+# Otherwise, exit with an error code of 1.
 if __name__ == "__main__":
     try:
         main()
@@ -125,13 +190,22 @@ if __name__ == "__main__":
             sys.exit(0)
         except SystemExit:
             os._exit(0)
+    except Exception as ex:
+        print(str(ex))
+        try:
+            sys.exit(1)
+        except SystemExit:
+            os._exit(1)
+
 
 EOF
 
-cat << EOF > $SCANNER_PATH/subnets.json
+cat << EOF > $SCANNER_PATH/config.json
 {
-  "subnets": ["192.168.0.0/24", "10.0.0.0/24"]
+  "subnets": ["192.168.166.0/24"],
+  "verbose": true
 }
+
 
 EOF
 
