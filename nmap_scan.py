@@ -95,7 +95,9 @@ def __log(text: object, level: str, verbose: bool = False) -> None:
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
  
-
+# We assume the result is successful when user interrupted
+# the scan as it is an intentional act.
+# Otherwise, exit with an error code of 1.
 if __name__ == "__main__":
     try:
         main()
@@ -105,3 +107,9 @@ if __name__ == "__main__":
             sys.exit(0)
         except SystemExit:
             os._exit(0)
+    except Exception as ex:
+        print(str(ex))
+        try:
+            sys.exit(1)
+        except SystemExit:
+            os._exit(1) 
