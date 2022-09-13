@@ -149,7 +149,6 @@ def __log(text: object, level: str, verbose: bool = False) -> None:
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
 
-
 def __validate_json(jsonData: str, schema) -> bool:
     try:
         jsonschema.validate(instance=jsonData, schema=schema)
