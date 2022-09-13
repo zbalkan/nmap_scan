@@ -67,34 +67,37 @@ def detect_logpath() -> str:
 def log_debug(text: object, verbose: bool = False) -> None:
     __log(text, 'debug', verbose)
 
+
 def log_info(text: object, verbose: bool = False) -> None:
     __log(text, 'info', verbose)
 
+
 def log_error(text: object, verbose: bool = False) -> None:
     __log(text, 'error', verbose)
+
 
 def __log(text: object, level: str, verbose: bool = False) -> None:
     logRecord: dict = dict()
     now: datetime = datetime.now()
     logRecord["localtime"] = str(now.now())
-    logRecord["timezone"] = str(now.now(datetime.timezone.utc).astimezone().tzinfo)
     logRecord["utctime"] = str(now.utcnow())
     logRecord["type"] = "nmap_scan"
     logRecord["message"] = text
     logRecord["level"] = level
 
     message: str = json.dumps(logRecord, sort_keys=True)
-    
-    if(level == 'error'):
+
+    if (level == 'error'):
         logging.error(message)
-    if(level == 'info'):
+    if (level == 'info'):
         logging.info(message)
-    if(level == 'debug'):
+    if (level == 'debug'):
         logging.debug(message)
-    
+
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
- 
+
+
 # We assume the result is successful when user interrupted
 # the scan as it is an intentional act.
 # Otherwise, exit with an error code of 1.
@@ -112,4 +115,4 @@ if __name__ == "__main__":
         try:
             sys.exit(1)
         except SystemExit:
-            os._exit(1) 
+            os._exit(1)
