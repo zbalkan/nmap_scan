@@ -1,6 +1,6 @@
 # NMAP Scanner for Wazuh
 
-A python script that runs an nmap scan within a network subnet and writes the results to log file in a json format. 
+A python script that runs an nmap scan within a network subnet and writes the results to log file in a json format.
 
 ## Usage
 
@@ -24,22 +24,43 @@ Or, you can set it up manually:
 - Run `pip install -r requirements.txt`
 - Run `python3 nmap_scan.py`
 
+## Configuration
+
+The configuration allows defining targets as nmap accepts such as "192.168.0.0/24" or "192.168.0.2.254". It alo allow labeling the source and destination, so that you can write custom rules.
+
+```json
+{
+  "source_label": "source",
+  "destination_label": "destination",
+  "subnets": [
+    "192.168.0.0/24"
+  ],
+  "args": "-sV -T4 -Pn -p- -sT -sU",
+  "verbose": true
+}
+```
+
 ## Wazuh rule
 
 ```xml
- <group name="linux,nmap,network_scan">
-     <rule id="200400" level="3">
+<group name="nmap,network_scan">
+     <rule id="110030" level="3">
          <decoded_as>json</decoded_as>
-         <field name="type">nmap_scan</field>
-         <field name="level">debug</field>
+         <field name="nmap.type">nmap_scan</field>
+         <description>NMAP scan messages grouped</description>
+         <options>no_full_log</options>
+     </rule>
+
+     <rule id="110031" level="3">
+         <if_sid>110030</if_sid>
+         <field name="nmap.level">debug</field>
          <description>NMAP scan debug messages</description>
          <options>no_full_log</options>
      </rule>
 
-     <rule id="200401" level="5">
-         <decoded_as>json</decoded_as>
-         <field name="type">nmap_scan</field>
-         <field name="level">info</field>
+     <rule id="110032" level="5">
+         <if_sid>110030</if_sid>
+         <field name="nmap.level">info</field>
          <description>NMAP scan results</description>
          <options>no_full_log</options>
      </rule>
@@ -48,4 +69,4 @@ Or, you can set it up manually:
 
 ## Thanks
 
-Based on the work <https://github.com/juaromu/wazuh-nmap>. 
+Based on the work of [juaromu](https://github.com/juaromu/wazuh-nmap).
