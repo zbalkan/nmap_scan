@@ -1,23 +1,43 @@
-#!/bin/bash
-#
-# Perform nmap-scan installation
+#!/usr/bin/env bash
 
+# Enable the condition below if root access is required
 if [ "$(id -u)" -ne 0 ]; then
-      echo "This script can be executed only as root, Exiting.."
-      exit 1
+    echo "This script can be executed only as root, Exiting.."
+    exit 1
 fi
 
+set -o errexit
+set -o nounset
+set -o pipefail
+if [[ "${TRACE-0}" == "1" ]]; then
+    set -o xtrace
+fi
+
+if [[ "${1-}" =~ ^-*h(elp)?$ ]]; then
+    echo 'This script installs the Wazuh nmap_scan script and configures it to run as a cron job.'
+    exit
+fi
+
+# Perform nmap-scan installation
+
 # Install dependencies
+
+echo "Installing dependencies"
 dnf install python3-pip -y
 dnf install nmap -y
-pip3 install -r requirements.txt
+
+pip3 install --user python-nmap==0.7.1
+pip3 install --user typing_extensions
 
 # Create nmap_scan folder
+echo "Creating nmap_scan folder and files"
 SCANNER_PATH="/var/ossec/active-response/nmap"
 mkdir -p $SCANNER_PATH
 
 # Write to the scanner python file
-cat <<EOF > $SCANNER_PATH/nmap_scan.py
+cat <<EOF >$SCANNER_PATH/nmap_scan.py
+#!/usr/bin/env python3
+
 ################################
 # Python Script to Run Network Scans and append results to Wazuh Active Responses Log
 # Requirements:
@@ -25,6 +45,8 @@ cat <<EOF > $SCANNER_PATH/nmap_scan.py
 # python-nmap (https://pypi.org/project/python-nmap/)
 # Do NOT include subnets with a network firewall in the path of the agent and the subnet.
 ################################
+import ctypes
+import ipaddress
 import json
 import logging
 import os
@@ -32,76 +54,44 @@ import platform
 import sys
 from datetime import datetime
 
-import jsonschema
 import nmap
 
-SCHEMA: str = '''
-{
-    "$schema": "https://json-schema.org/draft/2019-09/schema",
-    "$id": "http://example.com/example.json",
-    "type": "object",
-    "default": {},
-    "title": "Root Schema",
-    "required": [
-        "subnets",
-        "verbose"
-    ],
-    "properties": {
-        "subnets": {
-            "type": "array",
-            "default": [],
-            "title": "The subnets Schema",
-            "items": {
-                "type": "string",
-                "default": "",
-                "title": "A Schema",
-                "examples": [
-                    "192.168.166.0/24"
-                ]
-            },
-            "examples": [
-                [
-                    "192.168.166.0/24"]
-            ]
-        },
-        "verbose": {
-            "type": "boolean",
-            "default": false,
-            "title": "The verbose Schema",
-            "examples": [
-                true
-            ]
-        }
-    },
-    "examples": [{
-        "subnets": [
-            "192.168.166.0/24"
-        ],
-        "verbose": true
-    }]
-}
-'''
+
+def is_admin() -> bool:
+    if (platform.system() == "Windows"):
+        return bool(ctypes.windll.shell32.IsUserAnAdmin()) != 0
+    else:
+        return (os.getuid() == 0)  # type: ignore
 
 
 def main() -> None:
+
+    # Running NMAP requires running as sudo/administrator
+    if (is_admin() == False):
+        raise Exception(
+            "This application requires root/administrator privileges.")
+
     # Read and validate configuration
     configPath: str = os.path.dirname(
         os.path.realpath(__file__)) + "/config.json"
-    with open(configPath, "r") as read_file:
-        tempConfig = json.load(read_file)
+    try:
+        with open(configPath, "r") as read_file:
+            tempConfig = json.load(read_file)
+    except:
+        raise Exception("Invalid config file")
 
-    if (__validate_json(tempConfig, SCHEMA) == False):
-        print("Invalid config file")
-        exit(1)
-
-    subnets: list = tempConfig.get("subnets")
+    subnets: list[str] = tempConfig.get("subnets")
     verbose: bool = tempConfig.get("verbose")
+
+    source_label: str = tempConfig.get("source_label")
+    destination_label: str = tempConfig.get("destination_label")
+    arguments = tempConfig.get("args")
 
     logpath: str = detect_logpath()
 
     root_logger: logging.Logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
-    handler: logging.FileHandler = logging.FileHandler(logpath, 'w', 'utf-8')
+    handler: logging.FileHandler = logging.FileHandler(logpath, 'a', 'utf-8')
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
 
@@ -110,24 +100,33 @@ def main() -> None:
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
     for subnet in subnets:
+
         # Log per subnet
         if (verbose):
-            log_debug("Starting scan over in subnet: " +
-                      subnet, verbose=verbose)
+            log_debug(f"Starting scan against subnet: {subnet} with args: {arguments}",
+                      source_label=source_label,
+                      destination_label=destination_label,
+                      verbose=verbose)
 
-        for host, result in scanner.scan(subnet):
+        for host, result in scanner.scan(subnet, arguments=arguments):
             if (verbose):
                 print("Reporting host: " + host)
-            log_info(result, verbose=verbose)
+            log_info(result,
+                     source_label=source_label,
+                     destination_label=destination_label,
+                     verbose=verbose)
 
     if (verbose):
-        log_debug("Nmap scan completed.", verbose=verbose)
+        log_debug("Nmap scan completed.",
+                  source_label=source_label,
+                  destination_label=destination_label,
+                  verbose=verbose)
 
 
 def detect_logpath() -> str:
     logDir: str = os.path.join('/var/log', 'nmap_scan')
     if (platform.system() == "Windows"):
-        logDir: str = os.path.join(
+        logDir = os.path.join(
             os.getenv('ALLUSERSPROFILE', ''), 'nmap_scan')
 
     # if log folder does not exist, create
@@ -136,26 +135,30 @@ def detect_logpath() -> str:
     return os.path.join(logDir, 'nmap_scan.log')
 
 
-def log_debug(text: object, verbose: bool = False) -> None:
-    __log(text, 'debug', verbose)
+def log_debug(text: object, source_label: str, destination_label: str, verbose: bool = False) -> None:
+    __log(text, 'debug', source_label, destination_label, verbose)
 
 
-def log_info(text: object, verbose: bool = False) -> None:
-    __log(text, 'info', verbose)
+def log_info(text: object, source_label: str, destination_label: str, verbose: bool = False) -> None:
+    __log(text, 'info', source_label, destination_label, verbose)
 
 
-def log_error(text: object, verbose: bool = False) -> None:
-    __log(text, 'error', verbose)
+def log_error(text: object, source_label: str, destination_label: str, verbose: bool = False) -> None:
+    __log(text, 'error', source_label, destination_label, verbose)
 
 
-def __log(text: object, level: str, verbose: bool = False) -> None:
+def __log(text: object, level: str, source_label: str, destination_label: str, verbose: bool = False) -> None:
     logRecord: dict = dict()
+    logRecord['nmap'] = dict()
+
     now: datetime = datetime.now()
-    logRecord["localtime"] = str(now.now())
-    logRecord["utctime"] = str(now.utcnow())
-    logRecord["type"] = "nmap_scan"
-    logRecord["message"] = text
-    logRecord["level"] = level
+    logRecord['nmap']["localtime"] = str(now.now())
+    logRecord['nmap']["utctime"] = str(now.utcnow())
+    logRecord['nmap']["type"] = "nmap_scan"
+    logRecord['nmap']["message"] = text
+    logRecord['nmap']["level"] = level
+    logRecord['nmap']["source_label"] = source_label
+    logRecord['nmap']["destination_label"] = destination_label
 
     message: str = json.dumps(logRecord, sort_keys=True)
 
@@ -168,14 +171,6 @@ def __log(text: object, level: str, verbose: bool = False) -> None:
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
-
-
-def __validate_json(jsonData: str, schema) -> bool:
-    try:
-        jsonschema.validate(instance=jsonData, schema=schema)
-    except Exception:
-        return False
-    return True
 
 
 # We assume the result is successful when user interrupted
@@ -191,7 +186,7 @@ if __name__ == "__main__":
         except SystemExit:
             os._exit(0)
     except Exception as ex:
-        print(str(ex))
+        print('ERROR: ' + str(ex))
         try:
             sys.exit(1)
         except SystemExit:
@@ -200,26 +195,31 @@ if __name__ == "__main__":
 
 EOF
 
-cat << EOF > $SCANNER_PATH/config.json
+cat <<EOF >$SCANNER_PATH/config.json
 {
-  "subnets": ["192.168.166.0/24"],
+  "source_label": "source",
+  "destination_label": "destination",
+  "subnets": [
+    "192.168.0.0/24"
+  ],
+  "args": "-sV -T4 -Pn -p- -sT -sU",
   "verbose": true
 }
-
 
 EOF
 
 # Create CRON job
+echo "Creating cron job for running nmap scan"
 JOB1="0 0 1 * *          python3 $SCANNER_PATH/nmap_scan.py"
-JOB2="0 0 15 * *         python3 $SCANNER_PATH/nmap_scan.py"
+JOB2="0 0 16 * *         python3 $SCANNER_PATH/nmap_scan.py"
 
 CRON_FILE="/var/spool/cron/wazuh"
 
 if [ "$(grep -qi 'nmap_scan' $CRON_FILE)" != 0 ]; then
     echo "Updating cron job for cleaning temporary files"
     crontab -u wazuh -l >/tmp/crontab
-    /bin/echo "$JOB1" >> /tmp/crontab
-    /bin/echo "$JOB2" >> /tmp/crontab
+    /bin/echo "$JOB1" >>/tmp/crontab
+    /bin/echo "$JOB2" >>/tmp/crontab
     crontab -u wazuh /tmp/crontab
 fi
 
