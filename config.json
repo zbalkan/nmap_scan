@@ -4,6 +4,6 @@
   "subnets": [
     "192.168.0.0/24"
   ],
-  "args": "-T4 -Pn -p- -sS -sU",
+  "args": "-T4 -Pn -p- -sS -sU --min-parallelism 100 --min-rate 1000  -n",
   "verbose": true
 }
