@@ -210,8 +210,10 @@ JOB1="0 0 1 * *          python3 $SCANNER_PATH/nmap_scan.py"
 JOB2="0 0 16 * *         python3 $SCANNER_PATH/nmap_scan.py"
 
 # Create cron job for wazuh user
-sudo crontab -u wazuh -e >/dev/null 2>&1
 CRON_FILE="/var/spool/cron/wazuh"
+touch $CRON_FILE
+chown wazuh: $CRON_FILE
+chmod 600 $CRON_FILE
 
 if [ "$(grep -qi 'nmap_scan' $CRON_FILE)" != 0 ]; then
     echo "Updating cron job for cleaning temporary files"
