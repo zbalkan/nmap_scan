@@ -52,10 +52,7 @@ def log_error(text: object, source_label: str, destination_label: str, verbose: 
 def __log(text: object, level: str, source_label: str, destination_label: str, verbose: bool = False) -> None:
     logRecord: dict = dict()
     logRecord['nmap'] = dict()
-
-    now: datetime = datetime.now()
-    logRecord['nmap']["localtime"] = str(now.now())
-    logRecord['nmap']["utctime"] = str(now.utcnow())
+    logRecord['nmap']["timestamp"] = str(datetime.now())
     logRecord['nmap']["type"] = "nmap_scan"
     logRecord['nmap']["message"] = text
     logRecord['nmap']["level"] = level
@@ -103,13 +100,12 @@ def main() -> None:
     for subnet in subnets:
 
         # Log per subnet
-        if (verbose):
-            log_debug(f"Starting scan against subnet: {subnet} with args: {arguments}",
-                      source_label=source_label,
-                      destination_label=destination_label,
-                      verbose=verbose)
+        log_info(f"Starting scan against subnet: {subnet} with args: {arguments}",
+                 source_label=source_label,
+                 destination_label=destination_label,
+                 verbose=verbose)
 
-        for host, result in scanner.scan(subnet, arguments=arguments):
+        for host, result in scanner.scan(subnet, arguments=arguments, sudo=True):
             if (verbose):
                 print("Reporting host: " + host)
             log_info(result,
@@ -117,11 +113,10 @@ def main() -> None:
                      destination_label=destination_label,
                      verbose=verbose)
 
-    if (verbose):
-        log_debug("Nmap scan completed.",
-                  source_label=source_label,
-                  destination_label=destination_label,
-                  verbose=verbose)
+    log_info("Nmap scan completed.",
+             source_label=source_label,
+             destination_label=destination_label,
+             verbose=verbose)
 
 
 # We assume the result is successful when user interrupted
@@ -141,7 +136,8 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print('Cancelled by user.')
-        logging.info('Cancelled by user.')
+        logging.info(
+            '{"nmap":{"level":"error", "message":"Cancelled by user.","timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
         try:
             sys.exit(0)
         except SystemExit:
