@@ -202,7 +202,7 @@ cat <<EOF >$SCANNER_PATH/config.json
   "subnets": [
     "192.168.0.0/24"
   ],
-  "args": "-sV -T4 -Pn -p- -sT -sU",
+  "args": "-T4 -Pn -p- -sS -sU",
   "verbose": true
 }
 
