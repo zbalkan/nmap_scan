@@ -171,7 +171,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print('Cancelled by user.')
         logging.info(
-            '{"nmap":{"level":"error", "message":"Cancelled by user.","timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+            '{"nmap":{"level":"error", "data":{"text":"Cancelled by user."},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
         try:
             sys.exit(0)
         except SystemExit:
@@ -180,7 +180,7 @@ if __name__ == "__main__":
         print('ERROR: ' + str(ex))
         traceback.format_exc()
         logging.exception(
-            '{"nmap":{"level":"error", "message":"ERROR:' + str(ex) + '","timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+            '{"nmap":{"level":"error", "data":{"text":"ERROR:' + str(ex) + '"},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
         try:
             sys.exit(1)
         except SystemExit:

@@ -209,7 +209,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print('Cancelled by user.')
         logging.info(
-            '{"nmap":{"level":"error", "message":"Cancelled by user.","timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+            '{"nmap":{"level":"error", "data":{"text":"Cancelled by user."},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
         try:
             sys.exit(0)
         except SystemExit:
@@ -218,7 +218,7 @@ if __name__ == "__main__":
         print('ERROR: ' + str(ex))
         traceback.format_exc()
         logging.exception(
-            '{"nmap":{"level":"error", "message":"ERROR:' + str(ex) + '","timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+            '{"nmap":{"level":"error", "data":{"text":"ERROR:' + str(ex) + '"},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
         try:
             sys.exit(1)
         except SystemExit:
@@ -254,9 +254,8 @@ Description=Run nmap_scan.py script
 
 [Service]
 Type=simple
-User=wazuh
+User=root
 ExecStart=/usr/bin/python3 $SCANNER_PATH/nmap_scan.py
-Environment="SCANNER_PATH=$SCANNER_PATH"
 
 [Install]
 WantedBy=multi-user.target
@@ -273,9 +272,8 @@ cat <<EOF | sudo tee $TIMER_FILE >/dev/null
 Description=Timer to run nmap_scan.py script on 1st and 16th of every month
 
 [Timer]
-OnCalendar=monthly 1 00:00:00
-OnCalendar=monthly 16 00:00:00
-Persistent=true  # Ensure missed executions are run once the system is online
+OnCalendar=*-*-1,16 01:10:00
+Persistent=true
 
 [Install]
 WantedBy=timers.target
