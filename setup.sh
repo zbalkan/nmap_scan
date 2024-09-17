@@ -1,41 +1,100 @@
 #!/usr/bin/env bash
+set -eu -o pipefail
 
-# Enable the condition below if root access is required
-if [ "$(id -u)" -ne 0 ]; then
-    echo "This script can be executed only as root, Exiting.."
-    exit 1
+LOGROTATE_CONFIG_PATH="/etc/logrotate.d/nmap_scan"
+SCANNER_PATH="/opt/nmap_scan"
+CONFIG_PATH="/usr/local/etc/nmap_scan"
+
+AUTO_CONFIRM=false
+
+if [[ "${_DEBUG:-}" == "true" ]]; then
+    set -x
 fi
 
-set -o errexit
-set -o nounset
-set -o pipefail
-if [[ "${TRACE-0}" == "1" ]]; then
-    set -o xtrace
-fi
+# Function to ensure the script is run as root
+function check_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        echo "This script can be executed only as root, Exiting.."
+        exit 1
+    fi
+}
 
-if [[ "${1-}" =~ ^-*h(elp)?$ ]]; then
-    echo 'This script installs the Wazuh nmap_scan script and configures it to run as a cron job.'
-    exit
-fi
+# Function to check for the -y option and set AUTO_CONFIRM
+function parse_arguments() {
+    while getopts ":y" opt; do
+        case $opt in
+        y)
+            AUTO_CONFIRM=true
+            ;;
+        *)
+            echo "Invalid option: -$OPTARG" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
 
-# Perform nmap-scan installation
+function check_systemd() {
+    # Check if systemctl is available
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "Error: systemctl is not installed or available." >&2
+        exit 1
+    fi
+}
 
-# Install dependencies
+# Function to install dependencies with error handling
+function install_dependencies() {
+    echo "Installing dependencies"
 
-echo "Installing dependencies"
-dnf install python3-pip -y
-dnf install nmap -y
+    # Check if dnf is available
+    if ! command -v dnf >/dev/null 2>&1; then
+        echo "Error: dnf is not installed or available." >&2
+        exit 1
+    fi
 
-pip3 install --user python-nmap==0.7.1
-pip3 install --user typing_extensions
+    # Check if pip3 is available
+    if ! command -v pip3 >/dev/null 2>&1; then
+        echo "Error: pip3 is not installed or available." >&2
+        exit 1
+    fi
 
-# Create nmap_scan folder
-echo "Creating nmap_scan folder and files"
-SCANNER_PATH="/var/ossec/active-response/nmap"
-mkdir -p $SCANNER_PATH
+    # Install python3-pip and nmap, exit with error if installation fails
+    if ! dnf install -y python3-pip nmap; then
+        echo "Error: Failed to install python3-pip or nmap" >&2
+        exit 1
+    fi
 
-# Write to the scanner python file
-cat <<EOF >$SCANNER_PATH/nmap_scan.py
+    # Install required python packages
+    if ! pip3 install python-nmap==0.7.1 typing_extensions; then
+        echo "Error: Failed to install Python packages" >&2
+        exit 1
+    fi
+}
+
+# Function to create necessary directories and files
+function create_directories_and_files() {
+    echo "Creating nmap_scan folder and files"
+
+    mkdir -p "$SCANNER_PATH"
+    mkdir -p "$CONFIG_PATH"
+    chown -R root:root "$SCANNER_PATH"
+    chown -R root:root "$CONFIG_PATH"
+
+    # Check if the nmap_scan.py script already exists
+    if [[ -f "$SCANNER_PATH/nmap_scan.py" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+        else
+            read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping nmap_scan.py creation."
+                return
+            fi
+        fi
+    fi
+
+    # Write the nmap_scan.py script
+    cat <<EOF >"$SCANNER_PATH/nmap_scan.py"
 #!/usr/bin/env python3
 
 ################################
@@ -45,39 +104,40 @@ cat <<EOF >$SCANNER_PATH/nmap_scan.py
 # python-nmap (https://pypi.org/project/python-nmap/)
 # Do NOT include subnets with a network firewall in the path of the agent and the subnet.
 ################################
-import ctypes
 import json
 import logging
 import os
-import platform
 import re
 import sys
-from datetime import datetime
 import traceback
+from datetime import datetime
 
 import nmap
 
+LOG_PATH: str = '/var/log'
+CONFIG_PATH: str = "/usr/local/etc/nmap_scan" + '/config.json'
+
 
 def is_admin() -> bool:
-    if (platform.system() == "Windows"):
-        return bool(ctypes.windll.shell32.IsUserAnAdmin()) != 0
-    else:
-        return (os.getuid() == 0)  # type: ignore
+    return (os.getuid() == 0)  # type: ignore
 
 
 def detect_logpath() -> str:
-    logDir: str = '/var/log'
-    if (platform.system() == "Windows"):
-        logDir = os.getenv('ALLUSERSPROFILE', '')
-
-    # if log folder does not exist, create
-    os.makedirs(logDir, exist_ok=True)
-
-    return os.path.join(logDir, 'nmap_scan.log')
+    os.makedirs(LOG_PATH, exist_ok=True)
+    return os.path.join(LOG_PATH, 'nmap_scan.log')
 
 
-def log_debug(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-    log(text, 'debug', source_label, destination_label, target, verbose)
+def touch_logfile(path: str) -> None:
+    if not os.path.exists(path):
+        with open(path, 'w') as f:
+            f.write('')
+
+
+def ensure_log_permissions(path: str) -> None:
+    if os.path.exists(path):
+        os.chown(path, 0, 0)   # type: ignore
+        # Set file permissions to 640
+        os.chmod(path, 0o600)
 
 
 def log_info(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
@@ -111,8 +171,6 @@ def log(text: object, level: str, source_label: str, destination_label: str, tar
         logging.error(message)
     if (level == 'info'):
         logging.info(message)
-    if (level == 'debug'):
-        logging.debug(message)
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
@@ -147,24 +205,30 @@ def main() -> None:
 
     # Running NMAP requires running as sudo/administrator
     if (is_admin() == False):
-        raise Exception(
+        raise PermissionError(
             "This application requires root/administrator privileges.")
 
     # Read and validate configuration
-    configPath: str = os.path.dirname(
-        os.path.realpath(__file__)) + "/config.json"
     try:
-        with open(configPath, "r") as read_file:
+        with open(CONFIG_PATH, "r") as read_file:
             tempConfig = json.load(read_file)
-    except:
-        raise Exception("Invalid config file")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.")
+
+    except json.JSONDecodeError:
+        raise ValueError(
+            f"Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.")
 
     subnets: list[str] = tempConfig.get("subnets")
-    verbose: bool = tempConfig.get("verbose")
+
+    if not subnets:
+        raise ValueError("No subnets provided in config file.")
 
     source_label: str = tempConfig.get("source_label")
     destination_label: str = tempConfig.get("destination_label")
     arguments = tempConfig.get("args")
+    verbose: bool = tempConfig.get("verbose")
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
@@ -196,8 +260,10 @@ def main() -> None:
 # Otherwise, exit with an error code of 1.
 if __name__ == "__main__":
     logpath: str = detect_logpath()
+    touch_logfile(logpath)
+    ensure_log_permissions(logpath)
     root_logger: logging.Logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
     handler: logging.FileHandler = logging.FileHandler(logpath, 'a', 'utf-8')
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
@@ -225,10 +291,27 @@ if __name__ == "__main__":
             os._exit(1)
 
 
-
 EOF
 
-cat <<EOF >$SCANNER_PATH/config.json
+    # Set the ownership and permissions for nmap_scan.py
+    chown root:root "$SCANNER_PATH/nmap_scan.py"
+    chmod 500 "$SCANNER_PATH/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
+
+    # Check if config.json already exists
+    if [[ -f "$CONFIG_PATH/config.json" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+        else
+            read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping config.json creation."
+                return
+            fi
+        fi
+    fi
+
+    # Create the config.json file
+    cat <<EOF >"$CONFIG_PATH/config.json"
 {
   "source_label": "source",
   "destination_label": "destination",
@@ -241,14 +324,30 @@ cat <<EOF >$SCANNER_PATH/config.json
 
 EOF
 
-# Prepare the systemd service and timers
-SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
-TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
+    # Set permissions for the config.json file
+    chown root:root "$CONFIG_PATH/config.json"
+    chmod 600 "$CONFIG_PATH/config.json" # Only owner (nmap) can read/write
+}
 
-# Create the systemd service file
-echo "Creating systemd service file at $SERVICE_FILE"
+# Function to set up the systemd service
+function setup_systemd_service() {
+    local SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
 
-cat <<EOF | sudo tee $SERVICE_FILE >/dev/null
+    # Check if the service file already exists
+    if [[ -f "$SERVICE_FILE" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SERVICE_FILE"
+        else
+            read -r -p "Systemd service file $SERVICE_FILE already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping systemd service creation."
+                return
+            fi
+        fi
+    fi
+
+    echo "Creating systemd service file at $SERVICE_FILE"
+    cat <<EOF | tee "$SERVICE_FILE" >/dev/null
 [Unit]
 Description=Run nmap_scan.py script
 
@@ -256,18 +355,44 @@ Description=Run nmap_scan.py script
 Type=simple
 User=root
 ExecStart=/usr/bin/python3 $SCANNER_PATH/nmap_scan.py
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+PrivateTmp=true
+TimeoutStartSec=300
+Restart=on-failure
+RestartSec=30
+StartLimitInterval=5min
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Set permissions for the service file
-sudo chmod 644 $SERVICE_FILE
+    chmod 644 "$SERVICE_FILE"
+}
 
-# Create the systemd timer file
-echo "Creating systemd timer file at $TIMER_FILE"
+# Function to set up the systemd timer
+function setup_systemd_timer() {
+    local TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
 
-cat <<EOF | sudo tee $TIMER_FILE >/dev/null
+    # Check if the timer file already exists
+    if [[ -f "$TIMER_FILE" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $TIMER_FILE"
+        else
+            read -r -p "Systemd timer file $TIMER_FILE already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping systemd timer creation."
+                return
+            fi
+        fi
+    fi
+
+    echo "Creating systemd timer file at $TIMER_FILE"
+    cat <<EOF | tee "$TIMER_FILE" >/dev/null
 [Unit]
 Description=Timer to run nmap_scan.py script on 1st and 16th of every month
 
@@ -279,24 +404,79 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-# Set permissions for the timer file
-sudo chmod 644 $TIMER_FILE
+    chmod 644 "$TIMER_FILE"
+}
 
-# Reload systemd to pick up the new service and timer files
-echo "Reloading systemd daemon"
-sudo systemctl daemon-reload
+# Function to enable and start the systemd service and timer
+function enable_and_start_systemd() {
+    echo "Reloading systemd daemon"
+    systemctl daemon-reload
 
-# Enable and start the systemd timer
-echo "Enabling and starting the nmap_scan.timer"
-sudo systemctl enable nmap_scan.timer
-sudo systemctl start nmap_scan.timer
+    echo "Enabling and starting the nmap_scan.timer"
+    systemctl enable --now nmap_scan.timer
 
-# Confirm the status of the timer
-sudo systemctl status nmap_scan.timer
+    # Confirm the status of the timer
+    systemctl status nmap_scan.timer
+}
 
-# Display all active timers
-echo "Listing all active timers:"
-systemctl list-timers --all
+# Function to list all active systemd timers
+function list_active_timers() {
+    echo "Listing all active timers:"
+    systemctl list-timers --all
+}
 
-echo ""
-echo "Installation completed. Update the configuration file at $SCANNER_PATH/config.json to define the target subnets you want to scan."
+# Function to create a logrotate configuration for nmap_scan logs
+function setup_logrotate() {
+    echo "Creating logrotate configuration for nmap_scan logs"
+
+    # Check if the logrotate config already exists
+    if [[ -f "$LOGROTATE_CONFIG_PATH" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing logrotate configuration at $LOGROTATE_CONFIG_PATH"
+        else
+            read -r -p "Logrotate configuration already exists at $LOGROTATE_CONFIG_PATH. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping logrotate configuration."
+                return
+            fi
+        fi
+    fi
+
+    # Create the logrotate configuration file
+    cat <<EOF >"$LOGROTATE_CONFIG_PATH"
+/var/log/nmap_scan.log {
+    daily
+    rotate 3
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 600 root root
+}
+EOF
+
+    # Set appropriate permissions for the logrotate config
+    chmod 644 "$LOGROTATE_CONFIG_PATH"
+    echo "Logrotate configuration created at $LOGROTATE_CONFIG_PATH"
+}
+
+# Main function to run the setup process
+function main() {
+    check_root
+    parse_arguments "$@"
+    check_systemd
+    install_dependencies
+    create_directories_and_files
+    setup_systemd_service
+    setup_systemd_timer
+    enable_and_start_systemd
+    list_active_timers
+    setup_logrotate
+
+    echo ""
+    echo "Installation completed. Update the configuration file at $CONFIG_PATH/config.json to define the target subnets you want to scan."
+}
+
+# Call the main function with all script arguments
+main "$@"
