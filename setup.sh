@@ -4,8 +4,12 @@ set -eu -o pipefail
 LOGROTATE_CONFIG_PATH="/etc/logrotate.d/nmap_scan"
 SCANNER_PATH="/opt/nmap_scan"
 CONFIG_PATH="/usr/local/etc/nmap_scan"
+SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
+TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
+LOG_PATH="/var/log/nmap_scan.log"
 
 AUTO_CONFIRM=false
+UNINSTALL=false
 
 if [[ "${_DEBUG:-}" == "true" ]]; then
     set -x
@@ -19,12 +23,15 @@ function check_root() {
     fi
 }
 
-# Function to check for the -y option and set AUTO_CONFIRM
+# Function to check for the -y and -u options
 function parse_arguments() {
-    while getopts ":y" opt; do
+    while getopts ":yu" opt; do
         case $opt in
         y)
             AUTO_CONFIRM=true
+            ;;
+        u)
+            UNINSTALL=true
             ;;
         *)
             echo "Invalid option: -$OPTARG" >&2
@@ -461,21 +468,84 @@ EOF
     echo "Logrotate configuration created at $LOGROTATE_CONFIG_PATH"
 }
 
+# Function to uninstall everything
+function uninstall() {
+    echo "Uninstalling nmap scan setup"
+
+    # Stop and disable systemd service and timer
+    if systemctl is-active --quiet nmap_scan.timer; then
+        echo "Stopping and disabling systemd timer and service"
+        systemctl stop nmap_scan.timer
+        systemctl disable nmap_scan.timer
+    fi
+
+    if systemctl is-active --quiet nmap_scan.service; then
+        echo "Stopping and disabling systemd service"
+        systemctl stop nmap_scan.service
+        systemctl disable nmap_scan.service
+    fi
+
+    # Remove systemd service and timer files
+    if [[ -f "$SERVICE_FILE" ]]; then
+        echo "Removing systemd service file: $SERVICE_FILE"
+        rm -f "$SERVICE_FILE"
+    fi
+
+    if [[ -f "$TIMER_FILE" ]]; then
+        echo "Removing systemd timer file: $TIMER_FILE"
+        rm -f "$TIMER_FILE"
+    fi
+
+    # Remove the logrotate configuration
+    if [[ -f "$LOGROTATE_CONFIG_PATH" ]]; then
+        echo "Removing logrotate configuration: $LOGROTATE_CONFIG_PATH"
+        rm -f "$LOGROTATE_CONFIG_PATH"
+    fi
+
+    # Remove the nmap_scan script and config files
+    if [[ -d "$SCANNER_PATH" ]]; then
+        echo "Removing nmap_scan script directory: $SCANNER_PATH"
+        rm -rf "$SCANNER_PATH"
+    fi
+
+    if [[ -d "$CONFIG_PATH" ]]; then
+        echo "Removing nmap_scan config directory: $CONFIG_PATH"
+        rm -rf "$CONFIG_PATH"
+    fi
+
+    if [[ -d "$LOG_PATH" ]]; then
+        echo "Removing nmap_scan log file: $LOG_PATH"
+        rm -rf "$LOG_PATH"
+    fi
+
+    # Reload systemd to reflect the removed files
+    echo "Reloading systemd daemon"
+    systemctl daemon-reload
+
+    echo "Uninstallation completed."
+}
+
 # Main function to run the setup process
 function main() {
     check_root
     parse_arguments "$@"
-    check_systemd
-    install_dependencies
-    create_directories_and_files
-    setup_systemd_service
-    setup_systemd_timer
-    enable_and_start_systemd
-    list_active_timers
-    setup_logrotate
+    if [[ "$UNINSTALL" == "true" ]]; then
+        echo "Removing nmap scan setup"
+        uninstall
+    else
+        echo "Setting up nmap scan"
+        check_systemd
+        install_dependencies
+        create_directories_and_files
+        setup_systemd_service
+        setup_systemd_timer
+        enable_and_start_systemd
+        list_active_timers
+        setup_logrotate
 
-    echo ""
-    echo "Installation completed. Update the configuration file at $CONFIG_PATH/config.json to define the target subnets you want to scan."
+        echo ""
+        echo "Installation completed. Update the configuration file at $CONFIG_PATH/config.json to define the target subnets you want to scan."
+    fi
 }
 
 # Call the main function with all script arguments
