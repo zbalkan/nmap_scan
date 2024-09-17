@@ -2,7 +2,7 @@
 set -eu -o pipefail
 
 LOGROTATE_CONFIG_PATH="/etc/logrotate.d/nmap_scan"
-SCANNER_PATH="/usr/local/sbin"
+SCANNER_PATH="/opt/nmap_scan"
 CONFIG_PATH="/usr/local/etc/nmap_scan"
 
 AUTO_CONFIRM=false
@@ -65,33 +65,10 @@ function install_dependencies() {
     fi
 
     # Install required python packages
-    if ! pip3 install --root-user-action=ignore python-nmap==0.7.1 typing_extensions; then
+    if ! pip3 install python-nmap==0.7.1 typing_extensions; then
         echo "Error: Failed to install Python packages" >&2
         exit 1
     fi
-}
-
-# Function to create the nmap user (no password, no login shell)
-function create_nmap_user() {
-    echo "Creating a non-privileged nmap user with no password and no login shell"
-
-    # Create the user as a system account with no login shell
-    useradd -r -s /usr/sbin/nologin -M nmap || echo "nmap user already exists"
-
-    # Lock the nmap user to prevent password login (no password, no access)
-    passwd -l nmap
-
-    # Ensure the shell is set to nologin to prevent accidental `su` usage
-    usermod -s /usr/sbin/nologin nmap
-}
-
-# Function to configure sudo permissions for the nmap user with secure permissions
-function configure_sudo_permissions() {
-    echo "Configuring sudo permissions for nmap user"
-
-    # Create sudoers file with secure permissions
-    echo "nmap ALL=(root) NOPASSWD: /usr/bin/nmap, /usr/bin/python3" | tee /etc/sudoers.d/nmap >/dev/null
-    chmod 440 /etc/sudoers.d/nmap # Set secure permissions for sudoers file
 }
 
 # Function to create necessary directories and files
@@ -100,8 +77,8 @@ function create_directories_and_files() {
 
     mkdir -p "$SCANNER_PATH"
     mkdir -p "$CONFIG_PATH"
-    chown -R nmap:nmap "$SCANNER_PATH"
-    chown -R nmap:nmap "$CONFIG_PATH"
+    chown -R root:root "$SCANNER_PATH"
+    chown -R root:root "$CONFIG_PATH"
 
     # Check if the nmap_scan.py script already exists
     if [[ -f "$SCANNER_PATH/nmap_scan.py" ]]; then
@@ -134,12 +111,11 @@ import re
 import sys
 import traceback
 from datetime import datetime
-from grp import getgrnam  # type: ignore
-from pwd import getpwnam  # type: ignore
 
 import nmap
 
 LOG_PATH: str = '/var/log'
+CONFIG_PATH: str = "/usr/local/etc/nmap_scan" + '/config.json'
 
 
 def is_admin() -> bool:
@@ -159,10 +135,7 @@ def touch_logfile(path: str) -> None:
 
 def ensure_log_permissions(path: str) -> None:
     if os.path.exists(path):
-        # Set ownership to nmap:nmap (adjust UID and GID accordingly)
-        nmap_uid = getpwnam('nmap')[2]
-        nmap_gid = getgrnam('nmap')[2]
-        os.chown(path, nmap_uid, nmap_gid)   # type: ignore
+        os.chown(path, 0, 0)   # type: ignore
         # Set file permissions to 640
         os.chmod(path, 0o600)
 
@@ -236,18 +209,16 @@ def main() -> None:
             "This application requires root/administrator privileges.")
 
     # Read and validate configuration
-    configPath: str = os.path.dirname(
-        os.path.realpath(__file__)) + "/config.json"
     try:
-        with open(configPath, "r") as read_file:
+        with open(CONFIG_PATH, "r") as read_file:
             tempConfig = json.load(read_file)
     except FileNotFoundError:
         raise FileNotFoundError(
-            f"Configuration file not found at {configPath}. Please ensure the config.json file exists and has the correct path.")
+            f"Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.")
 
     except json.JSONDecodeError:
         raise ValueError(
-            f"Invalid JSON structure in {configPath}. Please validate the JSON format.")
+            f"Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.")
 
     subnets: list[str] = tempConfig.get("subnets")
 
@@ -323,7 +294,7 @@ if __name__ == "__main__":
 EOF
 
     # Set the ownership and permissions for nmap_scan.py
-    chown nmap:nmap "$SCANNER_PATH/nmap_scan.py"
+    chown root:root "$SCANNER_PATH/nmap_scan.py"
     chmod 500 "$SCANNER_PATH/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
 
     # Check if config.json already exists
@@ -354,7 +325,7 @@ EOF
 EOF
 
     # Set permissions for the config.json file
-    chown nmap:nmap "$CONFIG_PATH/config.json"
+    chown root:root "$CONFIG_PATH/config.json"
     chmod 600 "$CONFIG_PATH/config.json" # Only owner (nmap) can read/write
 }
 
@@ -369,7 +340,7 @@ Description=Run nmap_scan.py script
 
 [Service]
 Type=simple
-User=nmap
+User=root
 ExecStart=/usr/bin/sudo /usr/bin/python3 $SCANNER_PATH/nmap_scan.py
 NoNewPrivileges=true
 ProtectSystem=full
@@ -387,7 +358,7 @@ StartLimitBurst=3
 WantedBy=multi-user.target
 EOF
 
-    su chmod 644 "$SERVICE_FILE"
+    chmod 644 "$SERVICE_FILE"
 }
 
 # Function to set up the systemd timer
@@ -470,8 +441,6 @@ function main() {
     parse_arguments "$@"
     check_systemd
     install_dependencies
-    create_nmap_user
-    configure_sudo_permissions
     create_directories_and_files
     setup_systemd_service
     setup_systemd_timer

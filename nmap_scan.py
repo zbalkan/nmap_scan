@@ -14,12 +14,11 @@ import re
 import sys
 import traceback
 from datetime import datetime
-from grp import getgrnam  # type: ignore
-from pwd import getpwnam  # type: ignore
 
 import nmap
 
 LOG_PATH: str = '/var/log'
+CONFIG_PATH: str = "/usr/local/etc/nmap_scan" + '/config.json'
 
 
 def is_admin() -> bool:
@@ -39,10 +38,7 @@ def touch_logfile(path: str) -> None:
 
 def ensure_log_permissions(path: str) -> None:
     if os.path.exists(path):
-        # Set ownership to nmap:nmap (adjust UID and GID accordingly)
-        nmap_uid = getpwnam('nmap')[2]
-        nmap_gid = getgrnam('nmap')[2]
-        os.chown(path, nmap_uid, nmap_gid)   # type: ignore
+        os.chown(path, 0, 0)   # type: ignore
         # Set file permissions to 640
         os.chmod(path, 0o600)
 
@@ -116,18 +112,16 @@ def main() -> None:
             "This application requires root/administrator privileges.")
 
     # Read and validate configuration
-    configPath: str = os.path.dirname(
-        os.path.realpath(__file__)) + "/config.json"
     try:
-        with open(configPath, "r") as read_file:
+        with open(CONFIG_PATH, "r") as read_file:
             tempConfig = json.load(read_file)
     except FileNotFoundError:
         raise FileNotFoundError(
-            f"Configuration file not found at {configPath}. Please ensure the config.json file exists and has the correct path.")
+            f"Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.")
 
     except json.JSONDecodeError:
         raise ValueError(
-            f"Invalid JSON structure in {configPath}. Please validate the JSON format.")
+            f"Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.")
 
     subnets: list[str] = tempConfig.get("subnets")
 
