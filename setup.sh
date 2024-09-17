@@ -426,7 +426,7 @@ function setup_logrotate() {
     missingok
     notifempty
     copytruncate
-    create 600 nmap nmap
+    create 600 root root
 }
 EOF
 
