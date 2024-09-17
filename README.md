@@ -9,7 +9,8 @@ A python script that runs an nmap scan within a network subnet and writes the re
 You can use the setup script:
 
 - Run `setup.sh`
-- Fill in `config.json` with the subnet(s) required
+- Use the confirmation flag `-y` if you want to skip replying or want to use it as a part of automation.
+- Fill in `config.json` with the subnet(s) or IP ranges
 - Check systemd timers and update if needed
 
 Or, you can set it up manually:
@@ -20,7 +21,7 @@ Or, you can set it up manually:
 
 ### Single use (for test and debugging)
 
-- Fill in `config.json` with the subnet(s) required
+- Fill in `config.json` with the subnet(s) or IP ranges
 - Run `pip install -r requirements.txt`
 - Run `python3 nmap_scan.py`
 
@@ -34,6 +35,12 @@ The `setup.sh` file has a `-u` flag to uninstall the service. Just run:
 
 ```shell
 ./setup.sh -u
+```
+
+There is a confirmation step here as well bt you can bypass it using the confirmation flag `-y`.
+
+```shell
+./setup.sh -u -y
 ```
 
 The uninstall comand cleans up the items below. If you want to cleanup you can check these paths:

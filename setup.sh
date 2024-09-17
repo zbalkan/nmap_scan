@@ -92,7 +92,7 @@ function create_directories_and_files() {
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
             echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
         else
-            read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/n): " choice
+            read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping nmap_scan.py creation."
                 return
@@ -309,7 +309,7 @@ EOF
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
             echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
         else
-            read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/n): " choice
+            read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping config.json creation."
                 return
@@ -345,7 +345,7 @@ function setup_systemd_service() {
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
             echo "Overwriting existing $SERVICE_FILE"
         else
-            read -r -p "Systemd service file $SERVICE_FILE already exists. Overwrite? (y/n): " choice
+            read -r -p "Systemd service file $SERVICE_FILE already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping systemd service creation."
                 return
@@ -390,7 +390,7 @@ function setup_systemd_timer() {
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
             echo "Overwriting existing $TIMER_FILE"
         else
-            read -r -p "Systemd timer file $TIMER_FILE already exists. Overwrite? (y/n): " choice
+            read -r -p "Systemd timer file $TIMER_FILE already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping systemd timer creation."
                 return
@@ -441,7 +441,7 @@ function setup_logrotate() {
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
             echo "Overwriting existing logrotate configuration at $LOGROTATE_CONFIG_PATH"
         else
-            read -r -p "Logrotate configuration already exists at $LOGROTATE_CONFIG_PATH. Overwrite? (y/n): " choice
+            read -r -p "Logrotate configuration already exists at $LOGROTATE_CONFIG_PATH. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping logrotate configuration."
                 return
@@ -471,6 +471,17 @@ EOF
 # Function to uninstall everything
 function uninstall() {
     echo "Uninstalling nmap scan setup"
+
+    # Check if the logrotate config already exists
+    if [[ "$AUTO_CONFIRM" == "true" ]]; then
+        echo "Uninstalling without confirmation"
+    else
+        read -r -p "Are you sure you want to uninstall nmap_scan? (y/N): " choice
+        if [[ "$choice" != "y" ]]; then
+            echo "Canceling the uninstall operation."
+            return
+        fi
+    fi
 
     # Stop and disable systemd service and timer
     if systemctl is-active --quiet nmap_scan.timer; then
