@@ -341,7 +341,7 @@ Description=Run nmap_scan.py script
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/sudo /usr/bin/python3 $SCANNER_PATH/nmap_scan.py
+ExecStart=/usr/bin/python3 $SCANNER_PATH/nmap_scan.py
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
