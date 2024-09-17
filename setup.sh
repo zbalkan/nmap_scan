@@ -333,6 +333,19 @@ EOF
 function setup_systemd_service() {
     local SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
 
+    # Check if the service file already exists
+    if [[ -f "$SERVICE_FILE" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SERVICE_FILE"
+        else
+            read -r -p "Systemd service file $SERVICE_FILE already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping systemd service creation."
+                return
+            fi
+        fi
+    fi
+
     echo "Creating systemd service file at $SERVICE_FILE"
     cat <<EOF | tee "$SERVICE_FILE" >/dev/null
 [Unit]
@@ -364,6 +377,19 @@ EOF
 # Function to set up the systemd timer
 function setup_systemd_timer() {
     local TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
+
+    # Check if the timer file already exists
+    if [[ -f "$TIMER_FILE" ]]; then
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $TIMER_FILE"
+        else
+            read -r -p "Systemd timer file $TIMER_FILE already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping systemd timer creation."
+                return
+            fi
+        fi
+    fi
 
     echo "Creating systemd timer file at $TIMER_FILE"
     cat <<EOF | tee "$TIMER_FILE" >/dev/null
