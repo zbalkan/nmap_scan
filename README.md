@@ -10,13 +10,13 @@ You can use the setup script:
 
 - Run `setup.sh`
 - Fill in `config.json` with the subnet(s) required
-- Check crontab for tasks
+- Check systemd timers and update if needed
 
 Or, you can set it up manually:
 
 - Run `pip install -r requirements.txt`
 - Copy `nmap_scan.py` and `config.json` to a known location.
-- Create cron jobs to run
+- Create systemd timers or cron jobs
 
 ### Single use (for test and debugging)
 
@@ -24,9 +24,13 @@ Or, you can set it up manually:
 - Run `pip install -r requirements.txt`
 - Run `python3 nmap_scan.py`
 
+Or
+
+- run `sudo systemctl start nmap_scan.service` if you used the default method.
+
 ## Configuration
 
-The configuration allows defining targets as nmap accepts such as "192.168.0.0/24" or "192.168.0.2.254". It alo allow labeling the source and destination, so that you can write custom rules.
+The configuration allows defining targets as nmap accepts such as "192.168.0.0/24" or "192.168.0.2-254". It alo allow labeling the source and destination, so that you can write custom rules.
 
 ```json
 {

@@ -241,25 +241,64 @@ cat <<EOF >$SCANNER_PATH/config.json
 
 EOF
 
-# Create CRON job
-echo "Creating cron job for running nmap scan"
-JOB1="0 0 1 * *          python3 $SCANNER_PATH/nmap_scan.py"
-JOB2="0 0 16 * *         python3 $SCANNER_PATH/nmap_scan.py"
+# Prepare the systemd service and timers
+SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
+TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
 
-# Create cron job for wazuh user
-CRON_FILE="/var/spool/cron/wazuh"
-touch $CRON_FILE
-chown wazuh: $CRON_FILE
-chmod 600 $CRON_FILE
+# Create the systemd service file
+echo "Creating systemd service file at $SERVICE_FILE"
 
-if ! grep -qi 'nmap_scan' $CRON_FILE; then
-    echo "Updating cron job for cleaning temporary files"
-    crontab -u wazuh -l >/tmp/crontab
-    /bin/echo "$JOB1" >>/tmp/crontab
-    /bin/echo "$JOB2" >>/tmp/crontab
-    crontab -u wazuh /tmp/crontab
-    rm /tmp/crontab
-fi
+cat <<EOF | sudo tee $SERVICE_FILE >/dev/null
+[Unit]
+Description=Run nmap_scan.py script
+
+[Service]
+Type=simple
+User=wazuh
+ExecStart=/usr/bin/python3 $SCANNER_PATH/nmap_scan.py
+Environment="SCANNER_PATH=$SCANNER_PATH"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Set permissions for the service file
+sudo chmod 644 $SERVICE_FILE
+
+# Create the systemd timer file
+echo "Creating systemd timer file at $TIMER_FILE"
+
+cat <<EOF | sudo tee $TIMER_FILE >/dev/null
+[Unit]
+Description=Timer to run nmap_scan.py script on 1st and 16th of every month
+
+[Timer]
+OnCalendar=monthly 1 00:00:00
+OnCalendar=monthly 16 00:00:00
+Persistent=true  # Ensure missed executions are run once the system is online
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# Set permissions for the timer file
+sudo chmod 644 $TIMER_FILE
+
+# Reload systemd to pick up the new service and timer files
+echo "Reloading systemd daemon"
+sudo systemctl daemon-reload
+
+# Enable and start the systemd timer
+echo "Enabling and starting the nmap_scan.timer"
+sudo systemctl enable nmap_scan.timer
+sudo systemctl start nmap_scan.timer
+
+# Confirm the status of the timer
+sudo systemctl status nmap_scan.timer
+
+# Display all active timers
+echo "Listing all active timers:"
+systemctl list-timers --all
 
 echo ""
-echo "Installation completed. Fill in the subnets to scan in CIDR format, e.g. 10.0.0.0/24"
+echo "Installation completed. Update the configuration file at $SCANNER_PATH/config.json to define the target subnets you want to scan."
