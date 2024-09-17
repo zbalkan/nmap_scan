@@ -14,8 +14,12 @@ import re
 import sys
 import traceback
 from datetime import datetime
+from grp import getgrnam  # type: ignore
+from pwd import getpwnam  # type: ignore
 
 import nmap
+
+LOG_PATH: str = '/var/log'
 
 
 def is_admin() -> bool:
@@ -23,15 +27,24 @@ def is_admin() -> bool:
 
 
 def detect_logpath() -> str:
-    logDir: str = '/var/log'
-    # if log folder does not exist, create
-    os.makedirs(logDir, exist_ok=True)
-
-    return os.path.join(logDir, 'nmap_scan.log')
+    os.makedirs(LOG_PATH, exist_ok=True)
+    return os.path.join(LOG_PATH, 'nmap_scan.log')
 
 
-def log_debug(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-    log(text, 'debug', source_label, destination_label, target, verbose)
+def touch_logfile(path: str) -> None:
+    if not os.path.exists(path):
+        with open(path, 'w') as f:
+            f.write('')
+
+
+def ensure_log_permissions(path: str) -> None:
+    if os.path.exists(path):
+        # Set ownership to nmap:nmap (adjust UID and GID accordingly)
+        nmap_uid = getpwnam('nmap')[2]
+        nmap_gid = getgrnam('nmap')[2]
+        os.chown(path, nmap_uid, nmap_gid)   # type: ignore
+        # Set file permissions to 640
+        os.chmod(path, 0o600)
 
 
 def log_info(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
@@ -65,8 +78,6 @@ def log(text: object, level: str, source_label: str, destination_label: str, tar
         logging.error(message)
     if (level == 'info'):
         logging.info(message)
-    if (level == 'debug'):
-        logging.debug(message)
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
@@ -101,7 +112,7 @@ def main() -> None:
 
     # Running NMAP requires running as sudo/administrator
     if (is_admin() == False):
-        raise Exception(
+        raise PermissionError(
             "This application requires root/administrator privileges.")
 
     # Read and validate configuration
@@ -110,15 +121,23 @@ def main() -> None:
     try:
         with open(configPath, "r") as read_file:
             tempConfig = json.load(read_file)
-    except:
-        raise Exception("Invalid config file")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Configuration file not found at {configPath}. Please ensure the config.json file exists and has the correct path.")
+
+    except json.JSONDecodeError:
+        raise ValueError(
+            f"Invalid JSON structure in {configPath}. Please validate the JSON format.")
 
     subnets: list[str] = tempConfig.get("subnets")
-    verbose: bool = tempConfig.get("verbose")
+
+    if not subnets:
+        raise ValueError("No subnets provided in config file.")
 
     source_label: str = tempConfig.get("source_label")
     destination_label: str = tempConfig.get("destination_label")
     arguments = tempConfig.get("args")
+    verbose: bool = tempConfig.get("verbose")
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
@@ -150,8 +169,10 @@ def main() -> None:
 # Otherwise, exit with an error code of 1.
 if __name__ == "__main__":
     logpath: str = detect_logpath()
+    touch_logfile(logpath)
+    ensure_log_permissions(logpath)
     root_logger: logging.Logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
     handler: logging.FileHandler = logging.FileHandler(logpath, 'a', 'utf-8')
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)

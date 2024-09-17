@@ -5,6 +5,8 @@ LOGROTATE_CONFIG_PATH="/etc/logrotate.d/nmap_scan"
 SCANNER_PATH="/usr/local/sbin"
 CONFIG_PATH="/usr/local/etc/nmap_scan"
 
+AUTO_CONFIRM=false
+
 if [[ "${_DEBUG:-}" == "true" ]]; then
     set -x
 fi
@@ -13,6 +15,29 @@ fi
 function check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         echo "This script can be executed only as root, Exiting.."
+        exit 1
+    fi
+}
+
+# Function to check for the -y option and set AUTO_CONFIRM
+function parse_arguments() {
+    while getopts ":y" opt; do
+        case $opt in
+        y)
+            AUTO_CONFIRM=true
+            ;;
+        *)
+            echo "Invalid option: -$OPTARG" >&2
+            exit 1
+            ;;
+        esac
+    done
+}
+
+function check_systemd() {
+    # Check if systemctl is available
+    if ! command -v systemctl >/dev/null 2>&1; then
+        echo "Error: systemctl is not installed or available." >&2
         exit 1
     fi
 }
@@ -65,8 +90,8 @@ function configure_sudo_permissions() {
     echo "Configuring sudo permissions for nmap user"
 
     # Create sudoers file with secure permissions
-    echo "nmap ALL=(root) NOPASSWD: /usr/bin/nmap, /usr/bin/python3" | sudo tee /etc/sudoers.d/nmap >/dev/null
-    sudo chmod 440 /etc/sudoers.d/nmap # Set secure permissions for sudoers file
+    echo "nmap ALL=(root) NOPASSWD: /usr/bin/nmap, /usr/bin/python3" | tee /etc/sudoers.d/nmap >/dev/null
+    chmod 440 /etc/sudoers.d/nmap # Set secure permissions for sudoers file
 }
 
 # Function to create necessary directories and files
@@ -80,10 +105,14 @@ function create_directories_and_files() {
 
     # Check if the nmap_scan.py script already exists
     if [[ -f "$SCANNER_PATH/nmap_scan.py" ]]; then
-        read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/n): " choice
-        if [[ "$choice" != "y" ]]; then
-            echo "Skipping nmap_scan.py creation."
-            return
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+        else
+            read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping nmap_scan.py creation."
+                return
+            fi
         fi
     fi
 
@@ -105,8 +134,12 @@ import re
 import sys
 import traceback
 from datetime import datetime
+from grp import getgrnam  # type: ignore
+from pwd import getpwnam  # type: ignore
 
 import nmap
+
+LOG_PATH: str = '/var/log'
 
 
 def is_admin() -> bool:
@@ -114,15 +147,24 @@ def is_admin() -> bool:
 
 
 def detect_logpath() -> str:
-    logDir: str = '/var/log'
-    # if log folder does not exist, create
-    os.makedirs(logDir, exist_ok=True)
-
-    return os.path.join(logDir, 'nmap_scan.log')
+    os.makedirs(LOG_PATH, exist_ok=True)
+    return os.path.join(LOG_PATH, 'nmap_scan.log')
 
 
-def log_debug(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-    log(text, 'debug', source_label, destination_label, target, verbose)
+def touch_logfile(path: str) -> None:
+    if not os.path.exists(path):
+        with open(path, 'w') as f:
+            f.write('')
+
+
+def ensure_log_permissions(path: str) -> None:
+    if os.path.exists(path):
+        # Set ownership to nmap:nmap (adjust UID and GID accordingly)
+        nmap_uid = getpwnam('nmap')[2]
+        nmap_gid = getgrnam('nmap')[2]
+        os.chown(path, nmap_uid, nmap_gid)   # type: ignore
+        # Set file permissions to 640
+        os.chmod(path, 0o600)
 
 
 def log_info(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
@@ -156,8 +198,6 @@ def log(text: object, level: str, source_label: str, destination_label: str, tar
         logging.error(message)
     if (level == 'info'):
         logging.info(message)
-    if (level == 'debug'):
-        logging.debug(message)
 
     if (verbose):
         print(json.dumps(json.loads(message), indent=4))
@@ -192,7 +232,7 @@ def main() -> None:
 
     # Running NMAP requires running as sudo/administrator
     if (is_admin() == False):
-        raise Exception(
+        raise PermissionError(
             "This application requires root/administrator privileges.")
 
     # Read and validate configuration
@@ -201,15 +241,23 @@ def main() -> None:
     try:
         with open(configPath, "r") as read_file:
             tempConfig = json.load(read_file)
-    except:
-        raise Exception("Invalid config file")
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"Configuration file not found at {configPath}. Please ensure the config.json file exists and has the correct path.")
+
+    except json.JSONDecodeError:
+        raise ValueError(
+            f"Invalid JSON structure in {configPath}. Please validate the JSON format.")
 
     subnets: list[str] = tempConfig.get("subnets")
-    verbose: bool = tempConfig.get("verbose")
+
+    if not subnets:
+        raise ValueError("No subnets provided in config file.")
 
     source_label: str = tempConfig.get("source_label")
     destination_label: str = tempConfig.get("destination_label")
     arguments = tempConfig.get("args")
+    verbose: bool = tempConfig.get("verbose")
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
@@ -241,8 +289,10 @@ def main() -> None:
 # Otherwise, exit with an error code of 1.
 if __name__ == "__main__":
     logpath: str = detect_logpath()
+    touch_logfile(logpath)
+    ensure_log_permissions(logpath)
     root_logger: logging.Logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
     handler: logging.FileHandler = logging.FileHandler(logpath, 'a', 'utf-8')
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
@@ -269,14 +319,23 @@ if __name__ == "__main__":
         except SystemExit:
             os._exit(1)
 
+
 EOF
+
+    # Set the ownership and permissions for nmap_scan.py
+    chown nmap:nmap "$SCANNER_PATH/nmap_scan.py"
+    chmod 500 "$SCANNER_PATH/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
 
     # Check if config.json already exists
     if [[ -f "$CONFIG_PATH/config.json" ]]; then
-        read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/n): " choice
-        if [[ "$choice" != "y" ]]; then
-            echo "Skipping config.json creation."
-            return
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+        else
+            read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping config.json creation."
+                return
+            fi
         fi
     fi
 
@@ -294,10 +353,6 @@ EOF
 
 EOF
 
-    # Set the ownership and permissions for nmap_scan.py
-    chown nmap:nmap "$SCANNER_PATH/nmap_scan.py"
-    chmod 500 "$SCANNER_PATH/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
-
     # Set permissions for the config.json file
     chown nmap:nmap "$CONFIG_PATH/config.json"
     chmod 600 "$CONFIG_PATH/config.json" # Only owner (nmap) can read/write
@@ -308,7 +363,7 @@ function setup_systemd_service() {
     local SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
 
     echo "Creating systemd service file at $SERVICE_FILE"
-    cat <<EOF | sudo tee "$SERVICE_FILE" >/dev/null
+    cat <<EOF | tee "$SERVICE_FILE" >/dev/null
 [Unit]
 Description=Run nmap_scan.py script
 
@@ -319,17 +374,20 @@ ExecStart=/usr/bin/sudo /usr/bin/python3 $SCANNER_PATH/nmap_scan.py
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
+ProtectKernelModules=true
+ProtectControlGroups=true
 PrivateTmp=true
 TimeoutStartSec=300
 Restart=on-failure
-ProtectKernelModules=true
-ProtectControlGroups=true
+RestartSec=30
+StartLimitInterval=5min
+StartLimitBurst=3
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    sudo chmod 644 "$SERVICE_FILE"
+    su chmod 644 "$SERVICE_FILE"
 }
 
 # Function to set up the systemd timer
@@ -337,7 +395,7 @@ function setup_systemd_timer() {
     local TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
 
     echo "Creating systemd timer file at $TIMER_FILE"
-    cat <<EOF | sudo tee "$TIMER_FILE" >/dev/null
+    cat <<EOF | tee "$TIMER_FILE" >/dev/null
 [Unit]
 Description=Timer to run nmap_scan.py script on 1st and 16th of every month
 
@@ -349,20 +407,19 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-    sudo chmod 644 "$TIMER_FILE"
+    chmod 644 "$TIMER_FILE"
 }
 
 # Function to enable and start the systemd service and timer
 function enable_and_start_systemd() {
     echo "Reloading systemd daemon"
-    sudo systemctl daemon-reload
+    systemctl daemon-reload
 
     echo "Enabling and starting the nmap_scan.timer"
-    sudo systemctl enable nmap_scan.timer
-    sudo systemctl start nmap_scan.timer
+    systemctl enable --now nmap_scan.timer
 
     # Confirm the status of the timer
-    sudo systemctl status nmap_scan.timer
+    systemctl status nmap_scan.timer
 }
 
 # Function to list all active systemd timers
@@ -377,11 +434,14 @@ function setup_logrotate() {
 
     # Check if the logrotate config already exists
     if [[ -f "$LOGROTATE_CONFIG_PATH" ]]; then
-        echo "Logrotate configuration already exists at $LOGROTATE_CONFIG_PATH"
-        read -r -p "Overwrite the existing configuration? (y/n): " choice
-        if [[ "$choice" != "y" ]]; then
-            echo "Skipping logrotate configuration."
-            return
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            echo "Overwriting existing logrotate configuration at $LOGROTATE_CONFIG_PATH"
+        else
+            read -r -p "Logrotate configuration already exists at $LOGROTATE_CONFIG_PATH. Overwrite? (y/n): " choice
+            if [[ "$choice" != "y" ]]; then
+                echo "Skipping logrotate configuration."
+                return
+            fi
         fi
     fi
 
@@ -394,8 +454,8 @@ function setup_logrotate() {
     delaycompress
     missingok
     notifempty
-    create 640 nmap nmap
-    endscript
+    copytruncate
+    create 600 nmap nmap
 }
 EOF
 
@@ -407,6 +467,8 @@ EOF
 # Main function to run the setup process
 function main() {
     check_root
+    parse_arguments "$@"
+    check_systemd
     install_dependencies
     create_nmap_user
     configure_sudo_permissions
