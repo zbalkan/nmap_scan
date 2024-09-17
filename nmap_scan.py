@@ -7,31 +7,23 @@
 # python-nmap (https://pypi.org/project/python-nmap/)
 # Do NOT include subnets with a network firewall in the path of the agent and the subnet.
 ################################
-import ctypes
 import json
 import logging
 import os
-import platform
 import re
 import sys
-from datetime import datetime
 import traceback
+from datetime import datetime
 
 import nmap
 
 
 def is_admin() -> bool:
-    if (platform.system() == "Windows"):
-        return bool(ctypes.windll.shell32.IsUserAnAdmin()) != 0
-    else:
-        return (os.getuid() == 0)  # type: ignore
+    return (os.getuid() == 0)  # type: ignore
 
 
 def detect_logpath() -> str:
     logDir: str = '/var/log'
-    if (platform.system() == "Windows"):
-        logDir = os.getenv('ALLUSERSPROFILE', '')
-
     # if log folder does not exist, create
     os.makedirs(logDir, exist_ok=True)
 
