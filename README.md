@@ -28,6 +28,24 @@ Or
 
 - run `sudo systemctl start nmap_scan.service` if you used the default method.
 
+## Uninstall
+
+The `setup.sh` file has a `-u` flag to uninstall the service. Just run:
+
+```shell
+./setup.sh -u
+```
+
+The uninstall comand cleans up the items below. If you want to cleanup you can check these paths:
+LOGROTATE CONFIG PATH: "/etc/logrotate.d/nmap_scan"
+SCANNER PATH: "/opt/nmap_scan/nmap_scan.py"
+CONFIG PATH: "/usr/local/etc/nmap_scan/config.json"
+SERVICE FILE: "/etc/systemd/system/nmap_scan.service"
+TIMER FILE: "/etc/systemd/system/nmap_scan.timer"
+LOG PATH: "/var/log/nmap_scan.log"
+
+Or you can run a search like `find / -name "nmap_scan*"` and clean the remnants yourself.
+
 ## Configuration
 
 The configuration allows defining targets as nmap accepts such as "192.168.0.0/24" or "192.168.0.2-254". It alo allow labeling the source and destination, so that you can write custom rules.
