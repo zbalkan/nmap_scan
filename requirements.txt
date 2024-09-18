@@ -1,2 +1,0 @@
-python-nmap==0.7.1
-typing_extensions

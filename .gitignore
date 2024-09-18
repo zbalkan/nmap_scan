@@ -133,6 +133,7 @@ dmypy.json
 
 # Visual studio
 .vs/
+.vscode/
 
 # Project specific excludes
 pyvenv.cfg

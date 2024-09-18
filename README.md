@@ -15,14 +15,14 @@ You can use the setup script:
 
 Or, you can set it up manually:
 
-- Run `pip install -r requirements.txt`
+- Run `pip install python-nmap==0.7.1`
 - Copy `nmap_scan.py` and `config.json` to a known location.
 - Create systemd timers or cron jobs
 
 ### Single use (for test and debugging)
 
 - Fill in `config.json` with the subnet(s) or IP ranges
-- Run `pip install -r requirements.txt`
+- Run `pip install python-nmap==0.7.1`
 - Run `python3 nmap_scan.py`
 
 Or

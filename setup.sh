@@ -2,11 +2,12 @@
 set -eu -o pipefail
 
 LOGROTATE_CONFIG_PATH="/etc/logrotate.d/nmap_scan"
-SCANNER_PATH="/opt/nmap_scan"
-CONFIG_PATH="/usr/local/etc/nmap_scan"
-SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
-TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
+SCANNER_DIR="/opt/nmap_scan"
+CONFIG_PATH="/usr/local/etc/nmap_scan.conf"
+SERVICE_PATH="/etc/systemd/system/nmap_scan.service"
+TIMER_PATH="/etc/systemd/system/nmap_scan.timer"
 LOG_PATH="/var/log/nmap_scan.log"
+STATE_PATH="var/run/nmap_scan/nmap_scan.state"
 
 AUTO_CONFIRM=false
 UNINSTALL=false
@@ -72,7 +73,7 @@ function install_dependencies() {
     fi
 
     # Install required python packages
-    if ! pip3 install python-nmap==0.7.1 typing_extensions; then
+    if ! pip3 install python-nmap==0.7.1; then
         echo "Error: Failed to install Python packages" >&2
         exit 1
     fi
@@ -82,17 +83,15 @@ function install_dependencies() {
 function create_directories_and_files() {
     echo "Creating nmap_scan folder and files"
 
-    mkdir -p "$SCANNER_PATH"
-    mkdir -p "$CONFIG_PATH"
-    chown -R root:root "$SCANNER_PATH"
-    chown -R root:root "$CONFIG_PATH"
+    mkdir -p "$SCANNER_DIR"
+    chown -R root:root "$SCANNER_DIR"
 
     # Check if the nmap_scan.py script already exists
-    if [[ -f "$SCANNER_PATH/nmap_scan.py" ]]; then
+    if [[ -f "$SCANNER_DIR/nmap_scan.py" ]]; then
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
-            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+            echo "Overwriting existing $SCANNER_DIR/nmap_scan.py"
         else
-            read -r -p "File $SCANNER_PATH/nmap_scan.py already exists. Overwrite? (y/N): " choice
+            read -r -p "File $SCANNER_DIR/nmap_scan.py already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping nmap_scan.py creation."
                 return
@@ -101,28 +100,32 @@ function create_directories_and_files() {
     fi
 
     # Write the nmap_scan.py script
-    cat <<EOF >"$SCANNER_PATH/nmap_scan.py"
+    cat <<EOF >"$SCANNER_DIR/nmap_scan.py"
 #!/usr/bin/env python3
 
 ################################
-# Python Script to Run Network Scans and append results to Wazuh Active Responses Log
+# Python Script to Run Network Scans and log the results that can be consumed by any SIEM.
 # Requirements:
 # NMAP installed in Agent
 # python-nmap (https://pypi.org/project/python-nmap/)
-# Do NOT include subnets with a network firewall in the path of the agent and the subnet.
+# Do NOT include subnets with a network firewall in the path of the agent and the target.
 ################################
+import ipaddress
 import json
 import logging
 import os
 import re
 import sys
 import traceback
+from urllib import parse
+import uuid
 from datetime import datetime
 
 import nmap
 
-LOG_PATH: str = '/var/log'
-CONFIG_PATH: str = "/usr/local/etc/nmap_scan" + '/config.json'
+LOG_DIR: str = '/var/log'
+CONFIG_PATH: str = '/usr/local/etc/nmap_scan.conf'
+STATE_PATH: str = 'var/run/nmap_scan/nmap_scan.state'
 
 
 def is_admin() -> bool:
@@ -130,13 +133,15 @@ def is_admin() -> bool:
 
 
 def detect_logpath() -> str:
-    os.makedirs(LOG_PATH, exist_ok=True)
-    return os.path.join(LOG_PATH, 'nmap_scan.log')
+    os.makedirs(LOG_DIR, exist_ok=True)
+    return os.path.join(LOG_DIR, 'nmap_scan.log')
 
 
-def touch_logfile(path: str) -> None:
-    if not os.path.exists(path):
-        with open(path, 'w') as f:
+def touch(file: str) -> None:
+    if not os.path.exists(file):
+        dir = os.path.dirname(file)
+        os.makedirs(dir, exist_ok=True)
+        with open(file, 'w') as f:
             f.write('')
 
 
@@ -147,40 +152,33 @@ def ensure_log_permissions(path: str) -> None:
         os.chmod(path, 0o600)
 
 
-def log_info(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-    log(text, 'info', source_label, destination_label, target, verbose)
+def log_message(message: object, level: str, target: str, config: dict, correlation_id: str) -> None:
 
+    message_json: dict = dict()
+    message_json['nmap'] = dict()
 
-def log_error(text: object, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-    log(text, 'error', source_label, destination_label, target, verbose)
+    # let's dd some metadata for querying
+    message_json['nmap']['type'] = 'nmap_scan'
+    message_json['nmap']['level'] = level
+    message_json['nmap']['target'] = target
+    message_json['nmap']['scan_name'] = config['scan_name']
+    message_json['nmap']['source_label'] = config['source_label']
+    message_json['nmap']['destination_label'] = config['destination_label']
+    message_json['nmap']['correlation_id'] = correlation_id
 
+    # finally the log itself
+    message_json['nmap']['data'] = sanitize_log(message, 'target')
+    message_json['nmap']['timestamp'] = str(datetime.now())
 
-def log(text: object, level: str, source_label: str, destination_label: str, target: str = '', verbose: bool = False) -> None:
-
-    # sanitize field name
-    sanitized = sanitize_log(text, 'target')
-
-    logRecord: dict = dict()
-    logRecord['nmap'] = dict()
-    logRecord['nmap']["timestamp"] = str(datetime.now())
-    logRecord['nmap']["type"] = "nmap_scan"
-    logRecord['nmap']["data"] = sanitized
-    logRecord['nmap']["level"] = level
-    logRecord['nmap']["source_label"] = source_label
-    logRecord['nmap']["destination_label"] = destination_label
-
-    if len(target) > 0:
-        logRecord['nmap']['target'] = target
-
-    message: str = json.dumps(logRecord, sort_keys=True)
+    message_str: str = json.dumps(message_json, sort_keys=True)
 
     if (level == 'error'):
-        logging.error(message)
+        logging.error(message_str)
     if (level == 'info'):
-        logging.info(message)
+        logging.info(message_str)
 
-    if (verbose):
-        print(json.dumps(json.loads(message), indent=4))
+    if (config['verbose']):
+        print(json.dumps(json.loads(message_str), indent=4))
 
 
 def sanitize_log(message, new_key: str):
@@ -191,7 +189,7 @@ def sanitize_log(message, new_key: str):
             # Find the key that is the IP address
             for key in list(message['scan'].keys()):
                 if is_valid_ip(key):
-                    # Replace the IP address field name with the new key (e.g., "target")
+                    # Replace the IP address field name with the new key (e.g., 'target')
                     message['scan'][new_key] = message['scan'].pop(
                         key)
         return message
@@ -208,66 +206,196 @@ def is_valid_ip(ip: str) -> bool:
     return ip_pattern.match(ip) is not None
 
 
-def main() -> None:
+def load_state() -> dict:
+    state: dict
+    try:
+        with open(STATE_PATH, 'r') as state_file:
+            state = json.load(state_file)
+    except:
+        # create the file if it does not exist
+        touch(STATE_PATH)
+
+        state = dict()
+        state['scanned_hosts'] = []
+
+    return state
+
+
+def save_state(state) -> None:
+    with open(STATE_PATH, 'w') as state_file:
+        state_file.write(json.dumps(state))
+
+
+def range_to_ip(ip_input: str):
+    """
+    Parse input which can be a single IP, an IP range (e.g., 192.168.0.2-254), or a CIDR block.
+    Collapse the input into the smallest possible CIDR notation(s).
+
+    :param ip_input: String representation of an IP address, range, or CIDR.
+    :return: List of CIDR notations as strings.
+    """
+
+    # Regular expressions for CIDR, single IP, and IP range
+    cidr_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$")
+    single_ip_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+    range_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){2}\.\d{1,3}-\d{1,3}$")
+
+    # Check if input is CIDR notation
+    if cidr_pattern.match(ip_input):
+        # Handle CIDR directly
+        network = ipaddress.IPv4Network(ip_input, strict=False)
+        return [host for host in network.hosts()]
+
+    # Check if it's a single IP
+    elif single_ip_pattern.match(ip_input):
+        # Convert single IP to a /32 network
+        return [ipaddress.IPv4Address(ip_input)]
+
+    # Check if it's a range (e.g., 192.168.0.2-254)
+    elif range_pattern.match(ip_input):
+        # Extract base IP and range
+        base_ip, range_part = ip_input.rsplit('.', 1)
+        start_suffix, end_suffix = range_part.split('-')
+        ip_list = []
+
+        # Summarize IP range (e.g., 192.168.0.2 to 192.168.25.254) to CIDRs
+        first_ip = base_ip + '.' + start_suffix
+        last_ip = base_ip + '.' + end_suffix
+        for cidr in ipaddress.summarize_address_range(
+                ipaddress.IPv4Address(first_ip), ipaddress.IPv4Address(last_ip)):
+            ip_list.extend([ip for ip in cidr.hosts()])
+
+    else:
+        raise ValueError(f"Invalid input format: {ip_input}")
+
+
+def filter_scanned(scannable_targets, scanned):
+    if len(scanned) == 0:
+        return scannable_targets
+    else:
+        logging.info(
+            f'{len(scanned)} out of {len(scannable_targets)} hosts are already scanned')
+        ips_to_scan = []
+
+        # Convert scanned_hosts (strings) to IPv4Address objects and store them in a set for fast lookups
+        scanned_hosts = {
+            ipaddress.IPv4Address(address=ip) for ip in scanned}
+
+        for target in scannable_targets:
+            ip_list = range_to_ip(target)
+            if ip_list:
+                ips_to_scan.extend(
+                    [
+                        ip for ip in ip_list if ip.compressed not in scanned_hosts])
+
+        logging.info(f'{len(ips_to_scan)} addresses filtered')
+        # Convert the individual IPv4Address objects into IPv4Network objects with /32 prefix
+        hosts_to_scan_as_networks = [
+            ipaddress.IPv4Network(address=host) for host in ips_to_scan]
+
+        # Summarize the /32 networks into the smallest possible set of subnets
+        summarized_subnets = ipaddress.collapse_addresses(
+            addresses=hosts_to_scan_as_networks)
+
+        # Update targets with the summarized subnets in compressed form
+        filtered = [str(subnet) for subnet in summarized_subnets]
+        logging.info(
+            f'{len(filtered)} addresses filtered')
+        return filtered
+
+
+def main(correlation_id: str) -> None:
 
     # Running NMAP requires running as sudo/administrator
     if (is_admin() == False):
         raise PermissionError(
-            "This application requires root/administrator privileges.")
+            'This application requires root/administrator privileges.')
 
-    # Read and validate configuration
-    try:
-        with open(CONFIG_PATH, "r") as read_file:
-            tempConfig = json.load(read_file)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f"Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.")
+    configuration = load_configuration()
 
-    except json.JSONDecodeError:
-        raise ValueError(
-            f"Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.")
+    targets = configuration.get('targets')
 
-    subnets: list[str] = tempConfig.get("subnets")
+    if not targets or len(targets) == 0:
+        raise ValueError('No subnets provided in config file.')
 
-    if not subnets:
-        raise ValueError("No subnets provided in config file.")
+    arguments: str = configuration.get('args')
+    verbose: bool = configuration.get('verbose')
 
-    source_label: str = tempConfig.get("source_label")
-    destination_label: str = tempConfig.get("destination_label")
-    arguments = tempConfig.get("args")
-    verbose: bool = tempConfig.get("verbose")
+    # Read state for partial scans
+    state: dict = load_state()
+
+    state['correlation_id'] = correlation_id
+
+    # Filtering out already scanned hosts
+    targets = filter_scanned(scannable_targets=targets,
+                             scanned=state['scanned_hosts'])
+
+    if len(targets) == 0:
+        log_message(message='No hosts to scan.',
+                    level='info',
+                    target='None',
+                    config=configuration,
+                    correlation_id=correlation_id)
+        return
+
+    # Log per scan
+    sanitized_targets = str.join(',', targets)
+    log_message(message=f'Starting scan {configuration["scan_name"]} against target: {sanitized_targets} with args: {arguments}',
+                level='info',
+                target=sanitized_targets,
+                config=configuration,
+                correlation_id=correlation_id)
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
-    for subnet in subnets:
 
-        # Log per subnet
-        log_info(f"Starting scan against subnet: {subnet} with args: {arguments}",
-                 source_label=source_label,
-                 destination_label=destination_label,
-                 verbose=verbose)
+    for target in targets:
+        # Log per target
+        log_message(message=f'Starting scan against target: {target} with args: {arguments}',
+                    level='info',
+                    target=target,
+                    config=configuration,
+                    correlation_id=correlation_id)
 
-        for host, result in scanner.scan(subnet, arguments=arguments, sudo=True):
+        for host, result in scanner.scan(target, arguments=arguments, sudo=True):
             if (verbose):
-                print("Reporting host: " + host)
-            log_info(result,
-                     source_label=source_label,
-                     destination_label=destination_label,
-                     target=host,
-                     verbose=verbose)
+                print(f'Reporting host: {host}')
+            log_message(message=result,
+                        level='info',
+                        target=host,
+                        config=configuration,
+                        correlation_id=correlation_id)
+            state['scanned_hosts'].append(host)
+            save_state(state)
 
-    log_info("Nmap scan completed.",
-             source_label=source_label,
-             destination_label=destination_label,
-             verbose=verbose)
+    log_message(message='Nmap scan completed.',
+                level='info',
+                target=sanitized_targets,
+                config=configuration,
+                correlation_id=correlation_id)
+
+
+def load_configuration():
+    try:
+        with open(CONFIG_PATH, 'r') as read_file:
+            configuration = json.load(read_file)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f'Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.')
+
+    except json.JSONDecodeError:
+        raise ValueError(
+            f'Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.')
+
+    return configuration
 
 
 # We assume the result is successful when user interrupted
 # the scan as it is an intentional act.
 # Otherwise, exit with an error code of 1.
-if __name__ == "__main__":
+if __name__ == '__main__':
     logpath: str = detect_logpath()
-    touch_logfile(logpath)
+    touch(logpath)
     ensure_log_permissions(logpath)
     root_logger: logging.Logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -275,39 +403,57 @@ if __name__ == "__main__":
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
 
-    excepthook = log_error
+    excepthook = log_message
 
     try:
-        main()
+        # This is ugly but in order to let the user know the scan was cancelled
+        # or failed due to an error, we need to create the correlation_id here
+        # pass the correlation_id to the main function
+        # allow other functions to use the correlation_id
+        # out of main() scope
+        correlation_id: str = uuid.uuid4().hex
+        main(correlation_id=correlation_id)
     except KeyboardInterrupt:
         print('Cancelled by user.')
-        logging.info(
-            '{"nmap":{"level":"error", "data":{"text":"Cancelled by user."},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+        cancel_log: dict = dict()
+        cancel_log['nmap'] = dict()
+        cancel_log['nmap']['text'] = 'Cancelled by user.'
+        cancel_log['nmap']['timestamp'] = str(datetime.now())
+        cancel_log['nmap']['type'] = 'nmap_scan'
+        cancel_log['nmap']['level'] = 'error'
+        cancel_log['nmap']['correlation_id'] = correlation_id
+        logging.info(json.dumps(cancel_log))
         try:
             sys.exit(0)
         except SystemExit:
             os._exit(0)
     except Exception as ex:
-        print('ERROR: ' + str(ex))
-        traceback.format_exc()
-        logging.exception(
-            '{"nmap":{"level":"error", "data":{"text":"ERROR:' + str(ex) + '"},"timestamp":"' + str(datetime.now()) + '", "type":"nmap_scan"}}')
+        print(f'ERROR: {str(ex)}')
+        err_log: dict = dict()
+        err_log['nmap'] = dict()
+        err_log['nmap']['text'] = f'ERROR:{str(ex)}\nTRACEBACK:\n{traceback.format_exc()}'
+        err_log['nmap']['timestamp'] = str(datetime.now())
+        err_log['nmap']['type'] = 'nmap_scan'
+        err_log['nmap']['level'] = 'error'
+        err_log['nmap']['correlation_id'] = correlation_id
+        logging.exception(json.dumps(err_log))
         try:
             sys.exit(1)
         except SystemExit:
             os._exit(1)
 
 
+
 EOF
 
     # Set the ownership and permissions for nmap_scan.py
-    chown root:root "$SCANNER_PATH/nmap_scan.py"
-    chmod 500 "$SCANNER_PATH/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
+    chown root:root "$SCANNER_DIR/nmap_scan.py"
+    chmod 500 "$SCANNER_DIR/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
 
     # Check if config.json already exists
     if [[ -f "$CONFIG_PATH/config.json" ]]; then
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
-            echo "Overwriting existing $SCANNER_PATH/nmap_scan.py"
+            echo "Overwriting existing $SCANNER_DIR/nmap_scan.py"
         else
             read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
@@ -318,11 +464,12 @@ EOF
     fi
 
     # Create the config.json file
-    cat <<EOF >"$CONFIG_PATH/config.json"
+    cat <<EOF >"$CONFIG_PATH"
 {
   "source_label": "source",
   "destination_label": "destination",
-  "subnets": [
+  "scan_name": "VLAN X to VLAN Y",
+  "targets": [
     "192.168.0.0/24"
   ],
   "args": "-T4 -Pn -p- -sS -sU --min-parallelism 100 --min-rate 1000  -n",
@@ -331,21 +478,21 @@ EOF
 
 EOF
 
-    # Set permissions for the config.json file
-    chown root:root "$CONFIG_PATH/config.json"
-    chmod 600 "$CONFIG_PATH/config.json" # Only owner (nmap) can read/write
+    # Set permissions for the config file
+    chown root:root "$CONFIG_PATH"
+    chmod 600 "$CONFIG_PATH" # Only owner (nmap) can read/write
 }
 
 # Function to set up the systemd service
 function setup_systemd_service() {
-    local SERVICE_FILE="/etc/systemd/system/nmap_scan.service"
+    local SERVICE_PATH="/etc/systemd/system/nmap_scan.service"
 
     # Check if the service file already exists
-    if [[ -f "$SERVICE_FILE" ]]; then
+    if [[ -f "$SERVICE_PATH" ]]; then
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
-            echo "Overwriting existing $SERVICE_FILE"
+            echo "Overwriting existing $SERVICE_PATH"
         else
-            read -r -p "Systemd service file $SERVICE_FILE already exists. Overwrite? (y/N): " choice
+            read -r -p "Systemd service file $SERVICE_PATH already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping systemd service creation."
                 return
@@ -353,15 +500,15 @@ function setup_systemd_service() {
         fi
     fi
 
-    echo "Creating systemd service file at $SERVICE_FILE"
-    cat <<EOF | tee "$SERVICE_FILE" >/dev/null
+    echo "Creating systemd service file at $SERVICE_PATH"
+    cat <<EOF | tee "$SERVICE_PATH" >/dev/null
 [Unit]
 Description=Run nmap_scan.py script
 
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 $SCANNER_PATH/nmap_scan.py
+ExecStart=/usr/bin/python3 $SCANNER_DIR/nmap_scan.py
 NoNewPrivileges=true
 ProtectSystem=full
 ProtectHome=true
@@ -378,19 +525,19 @@ StartLimitBurst=3
 WantedBy=multi-user.target
 EOF
 
-    chmod 644 "$SERVICE_FILE"
+    chmod 644 "$SERVICE_PATH"
 }
 
 # Function to set up the systemd timer
 function setup_systemd_timer() {
-    local TIMER_FILE="/etc/systemd/system/nmap_scan.timer"
+    local TIMER_PATH="/etc/systemd/system/nmap_scan.timer"
 
     # Check if the timer file already exists
-    if [[ -f "$TIMER_FILE" ]]; then
+    if [[ -f "$TIMER_PATH" ]]; then
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
-            echo "Overwriting existing $TIMER_FILE"
+            echo "Overwriting existing $TIMER_PATH"
         else
-            read -r -p "Systemd timer file $TIMER_FILE already exists. Overwrite? (y/N): " choice
+            read -r -p "Systemd timer file $TIMER_PATH already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping systemd timer creation."
                 return
@@ -398,8 +545,8 @@ function setup_systemd_timer() {
         fi
     fi
 
-    echo "Creating systemd timer file at $TIMER_FILE"
-    cat <<EOF | tee "$TIMER_FILE" >/dev/null
+    echo "Creating systemd timer file at $TIMER_PATH"
+    cat <<EOF | tee "$TIMER_PATH" >/dev/null
 [Unit]
 Description=Timer to run nmap_scan.py script on 1st and 16th of every month
 
@@ -411,7 +558,7 @@ Persistent=true
 WantedBy=timers.target
 EOF
 
-    chmod 644 "$TIMER_FILE"
+    chmod 644 "$TIMER_PATH"
 }
 
 # Function to enable and start the systemd service and timer
@@ -424,12 +571,6 @@ function enable_and_start_systemd() {
 
     # Confirm the status of the timer
     systemctl status nmap_scan.timer
-}
-
-# Function to list all active systemd timers
-function list_active_timers() {
-    echo "Listing all active timers:"
-    systemctl list-timers --all
 }
 
 # Function to create a logrotate configuration for nmap_scan logs
@@ -470,6 +611,11 @@ EOF
 
 # Function to uninstall everything
 function uninstall() {
+
+    if ! (systemctl list-units --full -all | grep "nmap_scan"); then
+        echo "Service nmap_scan does not exist. Nothing to uninstall."
+        exit 1
+    fi
     echo "Uninstalling nmap scan setup"
 
     # Check if the logrotate config already exists
@@ -496,39 +642,89 @@ function uninstall() {
         systemctl disable nmap_scan.service
     fi
 
-    # Remove systemd service and timer files
-    if [[ -f "$SERVICE_FILE" ]]; then
-        echo "Removing systemd service file: $SERVICE_FILE"
-        rm -f "$SERVICE_FILE"
+    if [[ -f "$SERVICE_PATH" ]]; then
+        echo "Removing systemd service file: $SERVICE_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$SERVICE_PATH"
+        else
+            rm "$SERVICE_PATH"
+        fi
+        if [[ -f "$SERVICE_PATH" ]]; then
+            echo "Failed to delete $SERVICE_PATH. Consider removing manually."
+        fi
     fi
 
-    if [[ -f "$TIMER_FILE" ]]; then
-        echo "Removing systemd timer file: $TIMER_FILE"
-        rm -f "$TIMER_FILE"
+    if [[ -f "$TIMER_PATH" ]]; then
+        echo "Removing systemd timer file: $TIMER_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$TIMER_PATH"
+        else
+            rm "$TIMER_PATH"
+        fi
+        if [[ -f "$TIMER_PATH" ]]; then
+            echo "Failed to delete $TIMER_PATH. Consider removing manually."
+        fi
     fi
 
-    # Remove the logrotate configuration
     if [[ -f "$LOGROTATE_CONFIG_PATH" ]]; then
         echo "Removing logrotate configuration: $LOGROTATE_CONFIG_PATH"
-        rm -f "$LOGROTATE_CONFIG_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$LOGROTATE_CONFIG_PATH"
+        else
+            rm "$LOGROTATE_CONFIG_PATH"
+        fi
+        if [[ -f "$LOGROTATE_CONFIG_PATH" ]]; then
+            echo "Failed to delete $LOGROTATE_CONFIG_PATH. Consider removing manually."
+        fi
     fi
 
-    # Remove the nmap_scan script and config files
-    if [[ -d "$SCANNER_PATH" ]]; then
-        echo "Removing nmap_scan script directory: $SCANNER_PATH"
-        rm -rf "$SCANNER_PATH"
+    if [[ -d "$SCANNER_DIR" ]]; then
+        echo "Removing nmap_scan script directory: $SCANNER_DIR"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -rf "$SCANNER_DIR"
+        else
+            rm -r "$SCANNER_DIR"
+        fi
+        if [[ -f "$SCANNER_DIR" ]]; then
+            echo "Failed to delete $SCANNER_DIR. Consider removing manually."
+        fi
     fi
 
     if [[ -d "$CONFIG_PATH" ]]; then
-        echo "Removing nmap_scan config directory: $CONFIG_PATH"
-        rm -rf "$CONFIG_PATH"
+        echo "Removing nmap_scan config file: $CONFIG_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$CONFIG_PATH"
+        else
+            rm "$CONFIG_PATH"
+        fi
+        if [[ -f "$CONFIG_PATH" ]]; then
+            echo "Failed to delete $CONFIG_PATH. Consider removing manually."
+        fi
     fi
 
     if [[ -d "$LOG_PATH" ]]; then
         echo "Removing nmap_scan log file: $LOG_PATH"
-        rm -rf "$LOG_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$LOG_PATH"
+        else
+            rm "$LOG_PATH"
+        fi
+        if [[ -f "$LOG_PATH" ]]; then
+            echo "Failed to delete $LOG_PATH. Consider removing manually."
+        fi
     fi
 
+    if [[ -d "$STATE_PATH" ]]; then
+        echo "Removing nmap_scan state file: $STATE_PATH"
+        if [[ "$AUTO_CONFIRM" == "true" ]]; then
+            rm -f "$STATE_PATH"
+        else
+            rm "$STATE_PATH"
+        fi
+        if [[ -f "$STATE_PATH" ]]; then
+            echo "Failed to delete $STATE_PATH. Consider removing manually."
+        fi
+    fi
     # Reload systemd to reflect the removed files
     echo "Reloading systemd daemon"
     systemctl daemon-reload
@@ -551,11 +747,10 @@ function main() {
         setup_systemd_service
         setup_systemd_timer
         enable_and_start_systemd
-        list_active_timers
         setup_logrotate
 
         echo ""
-        echo "Installation completed. Update the configuration file at $CONFIG_PATH/config.json to define the target subnets you want to scan."
+        echo "Installation completed. Update the configuration file at $CONFIG_PATH to define the target subnets you want to scan."
     fi
 }
 
