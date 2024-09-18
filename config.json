@@ -1,7 +1,8 @@
 {
   "source_label": "source",
   "destination_label": "destination",
-  "subnets": [
+  "scan_name": "VLAN X to VLAN Y",
+  "targets": [
     "192.168.0.0/24"
   ],
   "args": "-T4 -Pn -p- -sS -sU --min-parallelism 100 --min-rate 1000  -n",
