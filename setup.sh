@@ -117,7 +117,6 @@ import os
 import re
 import sys
 import traceback
-from urllib import parse
 import uuid
 from datetime import datetime
 
@@ -304,7 +303,22 @@ def filter_scanned(scannable_targets, scanned):
         return filtered
 
 
-def main(correlation_id: str) -> None:
+def load_configuration():
+    try:
+        with open(CONFIG_PATH, 'r') as read_file:
+            configuration = json.load(read_file)
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f'Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.')
+
+    except json.JSONDecodeError:
+        raise ValueError(
+            f'Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.')
+
+    return configuration
+
+
+def main(state: dict) -> None:
 
     # Running NMAP requires running as sudo/administrator
     if (is_admin() == False):
@@ -321,11 +335,6 @@ def main(correlation_id: str) -> None:
     arguments: str = configuration.get('args')
     verbose: bool = configuration.get('verbose')
 
-    # Read state for partial scans
-    state: dict = load_state()
-
-    state['correlation_id'] = correlation_id
-
     # Filtering out already scanned hosts
     targets = filter_scanned(scannable_targets=targets,
                              scanned=state['scanned_hosts'])
@@ -335,7 +344,7 @@ def main(correlation_id: str) -> None:
                     level='info',
                     target='None',
                     config=configuration,
-                    correlation_id=correlation_id)
+                    correlation_id=state['correlation_id'])
         return
 
     # Log per scan
@@ -344,7 +353,7 @@ def main(correlation_id: str) -> None:
                 level='info',
                 target=sanitized_targets,
                 config=configuration,
-                correlation_id=correlation_id)
+                correlation_id=state['correlation_id'])
 
     # Initiate scan
     scanner: nmap.PortScannerYield = nmap.PortScannerYield()
@@ -355,7 +364,7 @@ def main(correlation_id: str) -> None:
                     level='info',
                     target=target,
                     config=configuration,
-                    correlation_id=correlation_id)
+                    correlation_id=state['correlation_id'])
 
         for host, result in scanner.scan(target, arguments=arguments, sudo=True):
             if (verbose):
@@ -364,7 +373,7 @@ def main(correlation_id: str) -> None:
                         level='info',
                         target=host,
                         config=configuration,
-                        correlation_id=correlation_id)
+                        correlation_id=state['correlation_id'])
             state['scanned_hosts'].append(host)
             save_state(state)
 
@@ -372,22 +381,7 @@ def main(correlation_id: str) -> None:
                 level='info',
                 target=sanitized_targets,
                 config=configuration,
-                correlation_id=correlation_id)
-
-
-def load_configuration():
-    try:
-        with open(CONFIG_PATH, 'r') as read_file:
-            configuration = json.load(read_file)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f'Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.')
-
-    except json.JSONDecodeError:
-        raise ValueError(
-            f'Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.')
-
-    return configuration
+                correlation_id=state['correlation_id'])
 
 
 # We assume the result is successful when user interrupted
@@ -407,12 +401,17 @@ if __name__ == '__main__':
 
     try:
         # This is ugly but in order to let the user know the scan was cancelled
-        # or failed due to an error, we need to create the correlation_id here
-        # pass the correlation_id to the main function
-        # allow other functions to use the correlation_id
+        # or failed due to an error, we need to load the state here
+        # pass itto the main function
+        # allow other functions to use the state
         # out of main() scope
-        correlation_id: str = uuid.uuid4().hex
-        main(correlation_id=correlation_id)
+
+        # Read state for partial scans
+        state: dict = load_state()
+        if 'correlation_id' not in state:
+            state['correlation_id'] = uuid.uuid4().hex
+
+        main(state=state)
     except KeyboardInterrupt:
         print('Cancelled by user.')
         cancel_log: dict = dict()
@@ -421,7 +420,7 @@ if __name__ == '__main__':
         cancel_log['nmap']['timestamp'] = str(datetime.now())
         cancel_log['nmap']['type'] = 'nmap_scan'
         cancel_log['nmap']['level'] = 'error'
-        cancel_log['nmap']['correlation_id'] = correlation_id
+        cancel_log['nmap']['correlation_id'] = state['correlation_id']
         logging.info(json.dumps(cancel_log))
         try:
             sys.exit(0)
@@ -435,13 +434,12 @@ if __name__ == '__main__':
         err_log['nmap']['timestamp'] = str(datetime.now())
         err_log['nmap']['type'] = 'nmap_scan'
         err_log['nmap']['level'] = 'error'
-        err_log['nmap']['correlation_id'] = correlation_id
+        err_log['nmap']['correlation_id'] = state['correlation_id']
         logging.exception(json.dumps(err_log))
         try:
             sys.exit(1)
         except SystemExit:
             os._exit(1)
-
 
 
 EOF
