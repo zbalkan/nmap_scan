@@ -412,6 +412,8 @@ if __name__ == '__main__':
             state['correlation_id'] = uuid.uuid4().hex
 
         main(state=state)
+        # Scan completed, reset state
+        save_state(dict())
     except KeyboardInterrupt:
         print('Cancelled by user.')
         cancel_log: dict = dict()
