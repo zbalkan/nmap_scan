@@ -80,8 +80,8 @@ function install_dependencies() {
 }
 
 # Function to create necessary directories and files
-function create_directories_and_files() {
-    echo "Creating nmap_scan folder and files"
+function create_script() {
+    echo "Creating nmap_scan script"
 
     mkdir -p "$SCANNER_DIR"
     chown -R root:root "$SCANNER_DIR"
@@ -444,16 +444,20 @@ if __name__ == '__main__':
 
 EOF
 
+}
+function create_config() {
+    echo "Creating nmap_scan script configuration"
+
     # Set the ownership and permissions for nmap_scan.py
     chown root:root "$SCANNER_DIR/nmap_scan.py"
     chmod 500 "$SCANNER_DIR/nmap_scan.py" # Owner (nmap) has read and execute, no permissions for others
 
     # Check if config.json already exists
-    if [[ -f "$CONFIG_PATH/config.json" ]]; then
+    if [[ -f "$CONFIG_PATH" ]]; then
         if [[ "$AUTO_CONFIRM" == "true" ]]; then
-            echo "Overwriting existing $SCANNER_DIR/nmap_scan.py"
+            echo "Overwriting existing $CONFIG_PATH"
         else
-            read -r -p "File $CONFIG_PATH/config.json already exists. Overwrite? (y/N): " choice
+            read -r -p "File $CONFIG_PATH already exists. Overwrite? (y/N): " choice
             if [[ "$choice" != "y" ]]; then
                 echo "Skipping config.json creation."
                 return
@@ -741,7 +745,8 @@ function main() {
         echo "Setting up nmap scan"
         check_systemd
         install_dependencies
-        create_directories_and_files
+        create_script
+        create_config
         setup_systemd_service
         setup_systemd_timer
         enable_and_start_systemd
