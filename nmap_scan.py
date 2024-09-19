@@ -21,7 +21,7 @@ import nmap
 
 LOG_DIR: str = '/var/log'
 CONFIG_PATH: str = '/usr/local/etc/nmap_scan.conf'
-STATE_PATH: str = 'var/run/nmap_scan/nmap_scan.state'
+STATE_PATH: str = '/var/run/nmap_scan/nmap_scan.state'
 
 
 def is_admin() -> bool:
