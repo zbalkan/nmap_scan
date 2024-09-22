@@ -35,7 +35,7 @@ def detect_logpath() -> str:
 
 def touch(file: str) -> None:
     if not os.path.exists(file):
-        dir = os.path.dirname(file)
+        dir: str = os.path.dirname(file)
         os.makedirs(dir, exist_ok=True)
         with open(file, 'w') as f:
             f.write('')
@@ -44,297 +44,261 @@ def touch(file: str) -> None:
 def ensure_log_permissions(path: str) -> None:
     if os.path.exists(path):
         os.chown(path, 0, 0)   # type: ignore
-        # Set file permissions to 640
         os.chmod(path, 0o600)
 
 
-def log_message(message: object, level: str, target: str, config: dict, correlation_id: str) -> None:
+class NmapScanner:
+    def __init__(self, log_path: str = '') -> None:
+        self.load_configuration()
+        self.load_state()
+        if len(log_path) > 0:
+            self.logpath = log_path
+        else:
+            self.logpath = detect_logpath()
 
-    message_json: dict = dict()
-    message_json['nmap'] = dict()
+    def save_state(self) -> None:
+        """
+        Save the current scan state or reset it if requested.
+        :param reset: If True, reset the state to an empty structure.
+        """
+        with open(STATE_PATH, 'w') as state_file:
+            state_file.write(json.dumps(self.state))
 
-    # let's dd some metadata for querying
-    message_json['nmap']['type'] = 'nmap_scan'
-    message_json['nmap']['level'] = level
-    message_json['nmap']['target'] = target
-    message_json['nmap']['scan_name'] = config['scan_name']
-    message_json['nmap']['source_label'] = config['source_label']
-    message_json['nmap']['destination_label'] = config['destination_label']
-    message_json['nmap']['correlation_id'] = correlation_id
+    def load_state(self) -> None:
+        """
+        Load the scan state from the state file.
+        If the state file is missing or empty, it initializes the state with an empty structure.
+        """
+        try:
+            with open(STATE_PATH, 'r') as state_file:
+                state = json.load(state_file)
+        except FileNotFoundError:
+            # If no state file is found, create an empty state
+            state: dict = {}
 
-    # finally the log itself
-    message_json['nmap']['data'] = sanitize_log(message, 'target')
-    message_json['nmap']['timestamp'] = str(datetime.now())
+        if not state:
+            state['correlation_id'] = uuid.uuid4().hex
+            state['scanned_hosts'] = []
+            self.save_state()  # Save the initialized state to file
 
-    message_str: str = json.dumps(message_json, sort_keys=True)
+        self.state = state
+        self.correlation_id = state.get('correlation_id', None)
 
-    if (level == 'error'):
-        logging.error(message_str)
-    if (level == 'info'):
-        logging.info(message_str)
+    def reset_state(self) -> None:
+        self.state = {}
+        self.save_state()
 
-    if (config['verbose']):
-        print(json.dumps(json.loads(message_str), indent=4))
+    def load_configuration(self) -> None:
+        try:
+            with open(CONFIG_PATH, 'r') as read_file:
+                self.config = json.load(read_file)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f'Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.')
 
+        except json.JSONDecodeError:
+            raise ValueError(
+                f'Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.')
 
-def sanitize_log(message, new_key: str):
+    def scan(self) -> None:
+        if not is_admin():
+            raise PermissionError(
+                'This application requires root/administrator privileges.')
 
-    if isinstance(message, dict):
-        # Traverse the JSON structure and look for the 'scan' object containing the IP
-        if 'scan' in message:
-            # Find the key that is the IP address
-            for key in list(message['scan'].keys()):
-                if is_valid_ip(key):
-                    # Replace the IP address field name with the new key (e.g., 'target')
-                    message['scan'][new_key] = message['scan'].pop(
-                        key)
-        return message
-    elif isinstance(message, str):
-        return json.loads('{"text":"' + message + '"}')
-    else:
-        return json.loads('{"text":"' + str(message) + '"}')
+        targets = self.config.get('targets')
+        if not targets or len(targets) == 0:
+            raise ValueError('No subnets provided in config file.')
 
+        arguments: str = str(self.config.get('args'))
+        verbose: bool = bool(self.config.get('verbose'))
 
-def is_valid_ip(ip: str) -> bool:
-    # Regular expression to validate IPv4 addresses
-    ip_pattern = re.compile(
-        r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
-    return ip_pattern.match(ip) is not None
+        # Filter out already scanned hosts
+        targets = self.filter_scanned(scannable_targets=targets)
 
+        if not targets:
+            self.log_message('No hosts to scan.', 'info', 'None')
+            return
 
-def load_state() -> dict:
-    state: dict
-    try:
-        with open(STATE_PATH, 'r') as state_file:
-            state = json.load(state_file)
-    except:
-        # create the file if it does not exist
-        touch(STATE_PATH)
+        # Logging the start of the scan
+        sanitized_targets = ','.join(targets)
+        self.log_message(
+            f'Starting scan {self.config["scan_name"]} against target: {sanitized_targets} with args: {arguments}', 'info', sanitized_targets)
 
-        state = dict()
-        state['scanned_hosts'] = []
+        # Nmap scan logic
+        scanner = nmap.PortScannerYield()
+        for target in targets:
+            self.log_message(
+                f'Starting scan against target: {target} with args: {arguments}', 'info', target)
+            for host, result in scanner.scan(target, arguments=arguments, sudo=True):
+                if verbose:
+                    print(f'Reporting host: {host}')
+                self.log_message(result, 'info', host)
+                self.state['scanned_hosts'].append(host)
+                self.save_state()  # Save the state after each host scan
 
-    return state
+        self.log_message('Nmap scan completed.', 'info', sanitized_targets)
 
+        # Reset the state after scan completion
+        self.reset_state()
 
-def save_state(state) -> None:
-    with open(STATE_PATH, 'w') as state_file:
-        state_file.write(json.dumps(state))
+    def range_to_ip(self, ip_input: str) -> list:
+        """
+        Parse input which can be a single IP, an IP range (e.g., 192.168.0.2-254), or a CIDR block.
+        Collapse the input into the smallest possible CIDR notation(s).
 
+        :param ip_input: String representation of an IP address, range, or CIDR.
+        :return: List of CIDR notations as strings.
+        """
 
-def range_to_ip(ip_input: str):
-    """
-    Parse input which can be a single IP, an IP range (e.g., 192.168.0.2-254), or a CIDR block.
-    Collapse the input into the smallest possible CIDR notation(s).
+        # Regular expressions for CIDR, single IP, and IP range
+        cidr_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$")
+        single_ip_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
+        range_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){2}\.\d{1,3}-\d{1,3}$")
 
-    :param ip_input: String representation of an IP address, range, or CIDR.
-    :return: List of CIDR notations as strings.
-    """
+        # Check if input is CIDR notation
+        if cidr_pattern.match(ip_input):
+            # Handle CIDR directly
+            network = ipaddress.IPv4Network(ip_input, strict=False)
+            return [host for host in network.hosts()]
 
-    # Regular expressions for CIDR, single IP, and IP range
-    cidr_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}/\d{1,2}$")
-    single_ip_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
-    range_pattern = re.compile(r"^\d{1,3}(\.\d{1,3}){2}\.\d{1,3}-\d{1,3}$")
+        # Check if it's a single IP
+        elif single_ip_pattern.match(ip_input):
+            # Convert single IP to a /32 network
+            return [ipaddress.IPv4Address(ip_input)]
 
-    # Check if input is CIDR notation
-    if cidr_pattern.match(ip_input):
-        # Handle CIDR directly
-        network = ipaddress.IPv4Network(ip_input, strict=False)
-        return [host for host in network.hosts()]
+        # Check if it's a range (e.g., 192.168.0.2-254)
+        elif range_pattern.match(ip_input):
+            # Extract base IP and range
+            base_ip, range_part = ip_input.rsplit('.', 1)
+            start_suffix, end_suffix = range_part.split('-')
+            ip_list: list = []
 
-    # Check if it's a single IP
-    elif single_ip_pattern.match(ip_input):
-        # Convert single IP to a /32 network
-        return [ipaddress.IPv4Address(ip_input)]
+            # Summarize IP range (e.g., 192.168.0.2 to 192.168.25.254) to CIDRs
+            first_ip = base_ip + '.' + start_suffix
+            last_ip = base_ip + '.' + end_suffix
+            for cidr in ipaddress.summarize_address_range(
+                    ipaddress.IPv4Address(first_ip), ipaddress.IPv4Address(last_ip)):
+                ip_list.extend([ip for ip in cidr.hosts()])
+            return ip_list
 
-    # Check if it's a range (e.g., 192.168.0.2-254)
-    elif range_pattern.match(ip_input):
-        # Extract base IP and range
-        base_ip, range_part = ip_input.rsplit('.', 1)
-        start_suffix, end_suffix = range_part.split('-')
-        ip_list = []
+        else:
+            raise ValueError(f"Invalid input format: {ip_input}")
 
-        # Summarize IP range (e.g., 192.168.0.2 to 192.168.25.254) to CIDRs
-        first_ip = base_ip + '.' + start_suffix
-        last_ip = base_ip + '.' + end_suffix
-        for cidr in ipaddress.summarize_address_range(
-                ipaddress.IPv4Address(first_ip), ipaddress.IPv4Address(last_ip)):
-            ip_list.extend([ip for ip in cidr.hosts()])
+    def filter_scanned(self, scannable_targets: list) -> list:
 
-    else:
-        raise ValueError(f"Invalid input format: {ip_input}")
+        scanned: list = self.state.get('scanned_hosts', [])
+        if len(scanned) == 0:
+            return scannable_targets
+        else:
+            logging.info(
+                f'{len(scanned)} out of {len(scannable_targets)} hosts are already scanned')
+            ips_to_scan = []
 
+            # Convert scanned_hosts (strings) to IPv4Address objects and store them in a set for fast lookups
+            scanned_hosts = {
+                ipaddress.IPv4Address(address=ip) for ip in scanned}
 
-def filter_scanned(scannable_targets, scanned):
-    if len(scanned) == 0:
-        return scannable_targets
-    else:
-        logging.info(
-            f'{len(scanned)} out of {len(scannable_targets)} hosts are already scanned')
-        ips_to_scan = []
+            for target in scannable_targets:
+                ip_list = self.range_to_ip(target)
+                if ip_list:
+                    ips_to_scan.extend(
+                        [
+                            ip for ip in ip_list if ip.compressed not in scanned_hosts])
 
-        # Convert scanned_hosts (strings) to IPv4Address objects and store them in a set for fast lookups
-        scanned_hosts = {
-            ipaddress.IPv4Address(address=ip) for ip in scanned}
+            logging.info(f'{len(ips_to_scan)} addresses filtered')
+            # Convert the individual IPv4Address objects into IPv4Network objects with /32 prefix
+            hosts_to_scan_as_networks = [
+                ipaddress.IPv4Network(address=host) for host in ips_to_scan]
 
-        for target in scannable_targets:
-            ip_list = range_to_ip(target)
-            if ip_list:
-                ips_to_scan.extend(
-                    [
-                        ip for ip in ip_list if ip.compressed not in scanned_hosts])
+            # Summarize the /32 networks into the smallest possible set of subnets
+            summarized_subnets = ipaddress.collapse_addresses(
+                addresses=hosts_to_scan_as_networks)
 
-        logging.info(f'{len(ips_to_scan)} addresses filtered')
-        # Convert the individual IPv4Address objects into IPv4Network objects with /32 prefix
-        hosts_to_scan_as_networks = [
-            ipaddress.IPv4Network(address=host) for host in ips_to_scan]
+            # Update targets with the summarized subnets in compressed form
+            filtered = [str(subnet) for subnet in summarized_subnets]
+            logging.info(
+                f'{len(filtered)} addresses filtered')
+            return filtered
 
-        # Summarize the /32 networks into the smallest possible set of subnets
-        summarized_subnets = ipaddress.collapse_addresses(
-            addresses=hosts_to_scan_as_networks)
+    def log_message(self, message: object, target: str, level: str = 'info') -> None:
+        # Logging logic (same as before)
 
-        # Update targets with the summarized subnets in compressed form
-        filtered = [str(subnet) for subnet in summarized_subnets]
-        logging.info(
-            f'{len(filtered)} addresses filtered')
-        return filtered
+        message_json: dict = dict()
+        message_json['nmap'] = dict()
 
+        # let's dd some metadata for querying
+        message_json['nmap']['type'] = 'nmap_scan'
+        message_json['nmap']['level'] = level
+        message_json['nmap']['target'] = target
+        message_json['nmap']['scan_name'] = self.config['scan_name']
+        message_json['nmap']['source_label'] = self.config['source_label']
+        message_json['nmap']['destination_label'] = self.config['destination_label']
+        message_json['nmap']['correlation_id'] = self.correlation_id
 
-def load_configuration():
-    try:
-        with open(CONFIG_PATH, 'r') as read_file:
-            configuration = json.load(read_file)
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            f'Configuration file not found at {CONFIG_PATH}. Please ensure the config.json file exists and has the correct path.')
+        # finally the log itself
+        message_json['nmap']['data'] = self.sanitize_log(message, 'target')
+        message_json['nmap']['timestamp'] = str(datetime.now())
 
-    except json.JSONDecodeError:
-        raise ValueError(
-            f'Invalid JSON structure in {CONFIG_PATH}. Please validate the JSON format.')
+        message_str: str = json.dumps(message_json, sort_keys=True)
 
-    return configuration
+        if (level == 'error'):
+            logging.error(message_str)
+        if (level == 'info'):
+            logging.info(message_str)
 
+        if (self.config['verbose']):
+            print(json.dumps(json.loads(message_str), indent=4))
 
-def main(state: dict) -> None:
+    def sanitize_log(self, message, new_key: str):
 
-    # Running NMAP requires running as sudo/administrator
-    if (is_admin() == False):
-        raise PermissionError(
-            'This application requires root/administrator privileges.')
+        if isinstance(message, dict):
+            # Traverse the JSON structure and look for the 'scan' object containing the IP
+            if 'scan' in message:
+                # Find the key that is the IP address
+                for key in list(message['scan'].keys()):
+                    if self.is_valid_ip(key):
+                        # Replace the IP address field name with the new key (e.g., 'target')
+                        message['scan'][new_key] = message['scan'].pop(
+                            key)
+            return message
+        elif isinstance(message, str):
+            return json.loads('{"text":"' + message + '"}')
+        else:
+            return json.loads('{"text":"' + str(message) + '"}')
 
-    configuration = load_configuration()
-
-    targets = configuration.get('targets')
-
-    if not targets or len(targets) == 0:
-        raise ValueError('No subnets provided in config file.')
-
-    arguments: str = configuration.get('args')
-    verbose: bool = configuration.get('verbose')
-
-    # Filtering out already scanned hosts
-    targets = filter_scanned(scannable_targets=targets,
-                             scanned=state['scanned_hosts'])
-
-    if len(targets) == 0:
-        log_message(message='No hosts to scan.',
-                    level='info',
-                    target='None',
-                    config=configuration,
-                    correlation_id=state['correlation_id'])
-        return
-
-    # Log per scan
-    sanitized_targets = str.join(',', targets)
-    log_message(message=f'Starting scan {configuration["scan_name"]} against target: {sanitized_targets} with args: {arguments}',
-                level='info',
-                target=sanitized_targets,
-                config=configuration,
-                correlation_id=state['correlation_id'])
-
-    # Initiate scan
-    scanner: nmap.PortScannerYield = nmap.PortScannerYield()
-
-    for target in targets:
-        # Log per target
-        log_message(message=f'Starting scan against target: {target} with args: {arguments}',
-                    level='info',
-                    target=target,
-                    config=configuration,
-                    correlation_id=state['correlation_id'])
-
-        for host, result in scanner.scan(target, arguments=arguments, sudo=True):
-            if (verbose):
-                print(f'Reporting host: {host}')
-            log_message(message=result,
-                        level='info',
-                        target=host,
-                        config=configuration,
-                        correlation_id=state['correlation_id'])
-            state['scanned_hosts'].append(host)
-            save_state(state)
-
-    log_message(message='Nmap scan completed.',
-                level='info',
-                target=sanitized_targets,
-                config=configuration,
-                correlation_id=state['correlation_id'])
+    def is_valid_ip(self, ip: str) -> bool:
+        # Regular expression to validate IPv4 addresses
+        ip_pattern = re.compile(
+            r'^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$')
+        return ip_pattern.match(ip) is not None
 
 
-# We assume the result is successful when user interrupted
-# the scan as it is an intentional act.
-# Otherwise, exit with an error code of 1.
 if __name__ == '__main__':
-    logpath: str = detect_logpath()
-    touch(logpath)
-    ensure_log_permissions(logpath)
+    log_path: str = detect_logpath()
+    touch(log_path)
+    ensure_log_permissions(log_path)
     root_logger: logging.Logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
-    handler: logging.FileHandler = logging.FileHandler(logpath, 'a', 'utf-8')
+    handler: logging.FileHandler = logging.FileHandler(log_path, 'a', 'utf-8')
     handler.setFormatter(logging.Formatter('%(message)s'))
     root_logger.addHandler(handler)
 
-    excepthook = log_message
-
     try:
-        # This is ugly but in order to let the user know the scan was cancelled
-        # or failed due to an error, we need to load the state here
-        # pass itto the main function
-        # allow other functions to use the state
-        # out of main() scope
-
-        # Read state for partial scans
-        state: dict = load_state()
-        if 'correlation_id' not in state:
-            state['correlation_id'] = uuid.uuid4().hex
-
-        main(state=state)
-        # Scan completed, reset state
-        save_state(dict())
+        scanner = NmapScanner()
+        scanner.scan()
     except KeyboardInterrupt:
         print('Cancelled by user.')
-        cancel_log: dict = dict()
-        cancel_log['nmap'] = dict()
-        cancel_log['nmap']['text'] = 'Cancelled by user.'
-        cancel_log['nmap']['timestamp'] = str(datetime.now())
-        cancel_log['nmap']['type'] = 'nmap_scan'
-        cancel_log['nmap']['level'] = 'error'
-        cancel_log['nmap']['correlation_id'] = state['correlation_id']
-        logging.info(json.dumps(cancel_log))
+        scanner.log_message('Cancelled by user.', 'error')
         try:
             sys.exit(0)
         except SystemExit:
             os._exit(0)
     except Exception as ex:
         print(f'ERROR: {str(ex)}')
-        err_log: dict = dict()
-        err_log['nmap'] = dict()
-        err_log['nmap']['text'] = f'ERROR:{str(ex)}\nTRACEBACK:\n{traceback.format_exc()}'
-        err_log['nmap']['timestamp'] = str(datetime.now())
-        err_log['nmap']['type'] = 'nmap_scan'
-        err_log['nmap']['level'] = 'error'
-        err_log['nmap']['correlation_id'] = state['correlation_id']
-        logging.exception(json.dumps(err_log))
+        traceback.format_exc()
+
+        scanner.log_message(
+            {'error': str(ex), 'traceback': traceback.format_exc()}, 'error')
         try:
             sys.exit(1)
         except SystemExit:
